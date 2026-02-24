@@ -105,7 +105,7 @@ class OTelTraceReplayConfig(BaseModel):
     time_scale: float = Field(
         1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)"
     )
-    
+
     # Graph traversal mode
     use_graph_traversal: bool = Field(
         True, description="Use graph-based traversal instead of time-based sorting"
