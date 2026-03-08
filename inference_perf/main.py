@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import multiprocessing as mp
+import sys
 from argparse import ArgumentParser
 from inference_perf.analysis.analyze import analyze_reports
 from typing import List, Optional
@@ -36,6 +38,7 @@ from inference_perf.datagen import (
     CNNDailyMailDataGenerator,
     InfinityInstructDataGenerator,
     BillsumConversationsDataGenerator,
+    OTelTraceReplayDataGenerator,
 )
 from inference_perf.client.modelserver import (
     ModelServerClient,
@@ -98,6 +101,15 @@ class InferencePerfRunner:
 
 
 def main_cli() -> None:
+    # Set multiprocessing start method to 'fork' on macOS to avoid pickle issues
+    # This must be done before any multiprocessing operations
+    if sys.platform == 'darwin':  # macOS
+        try:
+            mp.set_start_method('fork', force=True)
+        except RuntimeError:
+            # Start method already set, ignore
+            pass
+    
     # Parse command line arguments
     parser = ArgumentParser()
     parser.add_argument("-c", "--config_file", help="Config File", required=False)
@@ -243,6 +255,12 @@ def main_cli() -> None:
     if len(config.load.stages) == 0 and config.load.sweep is None:
         raise Exception("Load stages must be configured, or sweep must be configured")
 
+    # Create multiprocessing manager for OTel trace replay if needed
+    # Must be created before workers are forked
+    mp_manager = None
+    if config.data and config.data.type == DataGenType.OTelTraceReplay and config.load.num_workers > 0:
+        mp_manager = mp.Manager()
+
     # Define DataGenerator
     datagen: DataGenerator
     if config.data:
@@ -304,6 +322,8 @@ def main_cli() -> None:
             datagen = InfinityInstructDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.BillsumConversations:
             datagen = BillsumConversationsDataGenerator(config.api, config.data, tokenizer)
+        elif config.data.type == DataGenType.OTelTraceReplay:
+            datagen = OTelTraceReplayDataGenerator(config.api, config.data, tokenizer, mp_manager)
         else:
             datagen = MockDataGenerator(config.api, config.data, tokenizer)
     else:

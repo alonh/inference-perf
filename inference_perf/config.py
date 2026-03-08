@@ -56,6 +56,7 @@ class DataGenType(Enum):
     CNNDailyMail = "cnn_dailymail"
     InfinityInstruct = "infinity_instruct"
     BillsumConversations = "billsum_conversations"
+    OTelTraceReplay = "otel_trace_replay"
 
 
 # Represents the distribution for input prompts and output generations.
@@ -91,6 +92,42 @@ class SharedPrefix(BaseModel):
     enable_multi_turn_chat: bool = False
 
 
+class OTelTraceReplayConfig(BaseModel):
+    """Configuration for OTel trace replay data generator."""
+
+    trace_directory: str = Field(..., description="Directory containing OTel JSON trace files")
+
+    # Concurrency and timing
+    concurrent_sessions: int = Field(1, ge=0, description="Number of sessions to replay concurrently (0 = all)")
+    session_start_delay_sec: float = Field(0.0, ge=0.0, description="Delay between session starts in seconds")
+    time_scale: float = Field(1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)")
+
+    # Model configuration
+    use_static_model: bool = Field(False, description="Use a single static model for all requests")
+    static_model_name: str = Field("", description="Static model name (required if use_static_model=True)")
+    model_mapping: Optional[Dict[str, str]] = Field(None, description="Map recorded model names to target models")
+
+    # Request configuration
+    default_max_tokens: int = Field(1000, gt=0, description="Default max_tokens if not specified in trace")
+
+    # Dependency inference
+    dependency_window_ms: int = Field(120_000, gt=0, description="Time window for dependency inference (ms)")
+    max_dependencies_per_event: int = Field(3, gt=0, description="Maximum dependencies per event")
+
+    # Error handling
+    include_errors: bool = Field(True, description="Include spans with error status")
+    skip_invalid_files: bool = Field(True, description="Skip invalid trace files instead of failing")
+    validate_dependencies: bool = Field(False, description="Validate dependency graph and log warnings")
+
+    @model_validator(mode="after")
+    def validate_static_model(self) -> "OTelTraceReplayConfig":
+        if self.use_static_model and not self.static_model_name:
+            raise ValueError("static_model_name is required when use_static_model=True")
+        if not self.use_static_model and self.static_model_name and not self.model_mapping:
+            raise ValueError("Either use_static_model must be True or model_mapping must be provided")
+        return self
+
+
 class DataConfig(BaseModel):
     type: DataGenType = DataGenType.Mock
 
@@ -105,6 +142,9 @@ class DataConfig(BaseModel):
     # Trace file is only supported for random dataset at this moment
     trace: Optional[TraceConfig] = None
 
+    # OTel trace replay configuration
+    otel_trace_replay: Optional[OTelTraceReplayConfig] = None
+
 
 class ModelServerType(Enum):
     VLLM = "vllm"
@@ -118,6 +158,7 @@ class LoadType(Enum):
     POISSON = "poisson"
     TRACE_REPLAY = "trace_replay"
     CONCURRENT = "concurrent"
+    TRACE_SESSION_REPLAY = "trace_session_replay"
 
 
 class MetricsClientType(Enum):
@@ -167,6 +208,60 @@ class ConcurrentLoadStage(LoadStage):
         return self
 
 
+class TraceSessionReplayLoadStage(LoadStage):
+    """Load stage for TRACE_SESSION_REPLAY load type.
+
+    For OTel trace replay, this allows configuring session-level load patterns
+    instead of individual event rates. A session is one complete trace replay
+    (all events in a trace file).
+
+    Two modes:
+    1. Rate-based: Start N sessions per second for a duration
+    2. Count-based: Replay N total sessions with max concurrency
+    """
+
+    # Rate-based mode
+    session_rate: Optional[float] = Field(None, gt=0, description="Sessions to start per second")
+    duration: Optional[int] = Field(None, gt=0, description="Duration in seconds (for rate-based mode)")
+
+    # Count-based mode
+    num_sessions: Optional[int] = Field(None, gt=0, description="Total number of sessions to replay")
+    max_concurrent_sessions: Optional[int] = Field(None, gt=0, description="Max concurrent sessions (for count-based mode)")
+
+    # These fields are not used for trace session replay
+    rate: Optional[float] = Field(None, description="Not used for trace session replay")
+    num_requests: Optional[int] = Field(None, description="Not used for trace session replay")
+    concurrency_level: Optional[int] = Field(None, description="Not used for trace session replay")
+
+    @model_validator(mode="after")
+    def validate_trace_session_fields(self) -> "TraceSessionReplayLoadStage":
+        # Must specify either rate-based or count-based mode
+        rate_mode = self.session_rate is not None and self.duration is not None
+        count_mode = self.num_sessions is not None
+
+        if not rate_mode and not count_mode:
+            raise ValueError(
+                "Must specify either (session_rate + duration) for rate-based mode "
+                "or (num_sessions) for count-based mode"
+            )
+
+        if rate_mode and count_mode:
+            raise ValueError(
+                "Cannot specify both rate-based (session_rate + duration) and "
+                "count-based (num_sessions) modes simultaneously"
+            )
+
+        # Validate that unused fields are not set
+        if self.rate is not None:
+            raise ValueError("rate should not be set for TRACE_SESSION_REPLAY load type")
+        if self.num_requests is not None:
+            raise ValueError("num_requests should not be set for TRACE_SESSION_REPLAY load type")
+        if self.concurrency_level is not None:
+            raise ValueError("concurrency_level should not be set for TRACE_SESSION_REPLAY load type")
+
+        return self
+
+
 class StageGenType(Enum):
     GEOM = "geometric"
     LINEAR = "linear"
@@ -189,7 +284,7 @@ class MultiLoRAConfig(BaseModel):
 class LoadConfig(BaseModel):
     type: LoadType = LoadType.CONSTANT
     interval: float = 1.0
-    stages: Union[List[StandardLoadStage], List[ConcurrentLoadStage]] = []
+    stages: Union[List[StandardLoadStage], List[ConcurrentLoadStage], List[TraceSessionReplayLoadStage]] = []
     sweep: Optional[SweepConfig] = None
     num_workers: int = max(1, cpu_count())  # type: ignore
     worker_max_concurrency: int = 100
@@ -202,9 +297,9 @@ class LoadConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_load_config(self) -> "LoadConfig":
-        # Validate that sweep is not used with concurrent load type
-        if self.type == LoadType.CONCURRENT and self.sweep is not None:
-            raise ValueError("Cannot have sweep config with CONCURRENT load type")
+        # Validate that sweep is not used with concurrent or trace session replay load types
+        if self.type in (LoadType.CONCURRENT, LoadType.TRACE_SESSION_REPLAY) and self.sweep is not None:
+            raise ValueError(f"Cannot have sweep config with {self.type.value.upper()} load type")
 
         # Validate stage types match load type
         if self.type == LoadType.CONCURRENT:
@@ -213,7 +308,13 @@ class LoadConfig(BaseModel):
                     raise ValueError(
                         f"Stage {i}: CONCURRENT load type requires ConcurrentLoadStage, got {type(stage).__name__}"
                     )
-        else:  # CONSTANT or POISSON
+        elif self.type == LoadType.TRACE_SESSION_REPLAY:
+            for i, stage in enumerate(self.stages):
+                if not isinstance(stage, TraceSessionReplayLoadStage):
+                    raise ValueError(
+                        f"Stage {i}: TRACE_SESSION_REPLAY load type requires TraceSessionReplayLoadStage, got {type(stage).__name__}"
+                    )
+        else:  # CONSTANT, POISSON, or TRACE_REPLAY
             for i, stage in enumerate(self.stages):
                 if not isinstance(stage, StandardLoadStage):
                     raise ValueError(
@@ -343,8 +444,14 @@ def read_config(config_file: str) -> Config:
             for stage in stages:
                 concurrent_stages.append(ConcurrentLoadStage(**stage))
             merged_cfg["load"]["stages"] = concurrent_stages
+        elif load_type == "trace_session_replay":
+            # Convert to TraceSessionReplayLoadStage objects
+            trace_session_stages = []
+            for stage in stages:
+                trace_session_stages.append(TraceSessionReplayLoadStage(**stage))
+            merged_cfg["load"]["stages"] = trace_session_stages
         else:
-            # Convert to StandardLoadStage objects for constant/poisson
+            # Convert to StandardLoadStage objects for constant/poisson/trace_replay
             standard_stages = []
             for stage in stages:
                 standard_stages.append(StandardLoadStage(**stage))

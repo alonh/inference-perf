@@ -27,6 +27,7 @@ from inference_perf.config import (
     TraceFormat,
     ConcurrentLoadStage,
     StandardLoadStage,
+    TraceSessionReplayLoadStage,
 )
 from asyncio import (
     CancelledError,
@@ -168,6 +169,11 @@ class Worker(mp.Process):
                         sleep_time = request_time - current_time
                         if sleep_time > 0:
                             await sleep(sleep_time)
+                        
+                        # Wait for dependencies before dispatching (OTel trace replay)
+                        if hasattr(request_data, 'wait_for_predecessors_and_substitute'):
+                            await request_data.wait_for_predecessors_and_substitute()
+                        
                         with self.active_requests_counter.get_lock():
                             self.active_requests_counter.value += 1
                             inflight = True
@@ -294,6 +300,155 @@ class LoadGenerator:
                 if queue.qsize() == 0:
                     logger.debug("Drain finished")
                     return
+
+    async def run_session_stage(
+        self,
+        stage_id: int,
+        stage: TraceSessionReplayLoadStage,
+        request_queue: RequestQueue[RequestQueueData],
+        active_requests_counter: "Synchronized[int]",
+        finished_requests_counter: "Synchronized[int]",
+        request_phase: SyncEvent,
+        cancel_signal: Optional[SyncEvent] = None,
+    ) -> None:
+        """Run a session-based trace replay stage.
+        
+        Supports two modes:
+        1. Rate-based: Start sessions at specified rate for duration
+        2. Count-based: Start N sessions with max concurrency limit
+        """
+        logger.info("Stage %d - session-based run started", stage_id)
+        
+        request_phase.set()
+        with finished_requests_counter.get_lock():
+            finished_requests_counter.value = 0
+        
+        start_time_epoch = time.time()
+        start_time = time.perf_counter()
+        
+        # Get total number of sessions
+        from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
+        if not isinstance(self.datagen, OTelTraceReplayDataGenerator):
+            raise ValueError("Session-based replay requires OTelTraceReplayDataGenerator")
+        
+        total_sessions = self.datagen.get_session_count()
+        stage_status = StageStatus.RUNNING
+        
+        # Determine mode and parameters
+        if stage.session_rate is not None and stage.duration is not None:
+            # Rate-based mode
+            num_sessions = min(int(stage.session_rate * stage.duration), total_sessions)
+            session_interval = 1.0 / stage.session_rate if stage.session_rate > 0 else 0
+            duration = stage.duration
+            logger.info(f"Rate-based mode: {stage.session_rate} sessions/sec for {duration}s ({num_sessions} sessions)")
+        elif stage.num_sessions is not None:
+            # Count-based mode
+            num_sessions = min(stage.num_sessions, total_sessions)
+            session_interval = 0  # Start as fast as possible, limited by concurrency
+            duration = None  # No time limit
+            logger.info(f"Count-based mode: {num_sessions} sessions with max concurrency {stage.max_concurrent_sessions}")
+        else:
+            raise ValueError("Session stage must specify either (session_rate + duration) or (num_sessions + max_concurrent_sessions)")
+        
+        # Track active sessions for concurrency limiting
+        active_sessions = 0
+        max_concurrent = stage.max_concurrent_sessions if stage.max_concurrent_sessions else float('inf')
+        
+        # Dispatch sessions
+        sessions_started = 0
+        next_session_time = start_time
+        
+        active_workers = self.num_workers
+        
+        with tqdm(total=1.0, desc=f"Stage {stage_id} session progress") as pbar:
+            while sessions_started < num_sessions:
+                # Check for interrupts
+                if self.interrupt_sig:
+                    pbar.close()
+                    logger.info("Loadgen encountered SIGINT")
+                    stage_status = StageStatus.FAILED
+                    break
+                
+                if cb := next((cb for cb in self.circuit_breakers if cb.is_open()), None):
+                    logger.warning(f'Loadgen detects circuit breakers "{cb.name}" open, exit the stage.')
+                    stage_status = StageStatus.FAILED
+                    break
+                
+                # Check time limit for rate-based mode
+                if duration is not None:
+                    if time.perf_counter() >= start_time + duration:
+                        logger.info(f"Duration limit reached, started {sessions_started}/{num_sessions} sessions")
+                        break
+                
+                # Wait for concurrency slot
+                while active_sessions >= max_concurrent:
+                    await sleep(0.1)
+                    # Update active sessions count (approximate based on finished requests)
+                    # This is a simplification - in reality we'd track per-session completion
+                    active_sessions = max(0, sessions_started - (finished_requests_counter.value // max(1, total_sessions // num_sessions)))
+                
+                # Wait for next session start time (rate-based mode)
+                if session_interval > 0:
+                    now = time.perf_counter()
+                    if now < next_session_time:
+                        await sleep(next_session_time - now)
+                    next_session_time += session_interval
+                
+                # Get events for this session
+                session_event_indices = self.datagen.get_session_event_indices(sessions_started % total_sessions)
+                
+                # Dispatch all events in this session
+                # Get a fresh data generator for each session
+                data_generator = self.datagen.get_data()
+                event_count = 0
+                for request_data in data_generator:
+                    if event_count in session_event_indices:
+                        lora_adapter = self._get_lora_adapter()
+                        worker_id = request_data.prefered_worker_id
+                        if worker_id >= 0:
+                            worker_id = worker_id % active_workers
+                        
+                        # Use event's scheduled time relative to session start
+                        event_time = time.perf_counter()
+                        request_queue.put((stage_id, request_data, event_time, lora_adapter), worker_id)
+                    
+                    event_count += 1
+                    # Stop once we've dispatched all events for this session
+                    if event_count > max(session_event_indices):
+                        break
+                
+                sessions_started += 1
+                active_sessions += 1
+                
+                # Update progress
+                prog = sessions_started / num_sessions
+                pbar.update(prog - pbar.n)
+            
+            # Wait for all requests to complete
+            logger.info(f"Waiting for {num_sessions} sessions to complete...")
+            while finished_requests_counter.value < sum(len(self.datagen.get_session_event_indices(i % total_sessions)) for i in range(sessions_started)):
+                if self.interrupt_sig:
+                    stage_status = StageStatus.FAILED
+                    break
+                await sleep(1)
+                # Update progress based on finished requests
+                total_expected = sum(len(self.datagen.get_session_event_indices(i % total_sessions)) for i in range(sessions_started))
+                prog = min(1.0, finished_requests_counter.value / max(1, total_expected))
+                pbar.update(prog - pbar.n)
+        
+        # Clear the request_phase event to force worker gather
+        request_phase.clear()
+        request_queue.join()
+        
+        self.stage_runtime_info[stage_id] = StageRuntimeInfo(
+            stage_id=stage_id,
+            rate=stage.session_rate if stage.session_rate else 0.0,
+            start_time=start_time_epoch,
+            end_time=time.time(),
+            status=stage_status,
+            concurrency_level=stage.max_concurrent_sessions,
+        )
+        logger.info("Stage %d - session-based run %s", stage_id, "completed" if stage_status == StageStatus.COMPLETED else "failed")
 
     async def run_stage(
         self,
@@ -536,8 +691,19 @@ class LoadGenerator:
                 return
 
         for stage_id, stage in enumerate(self.stages):
+            # Handle session-based trace replay
+            if self.load_type == LoadType.TRACE_SESSION_REPLAY and isinstance(stage, TraceSessionReplayLoadStage):
+                await self.run_session_stage(
+                    stage_id,
+                    stage,
+                    request_queue,
+                    active_requests_counter,
+                    finished_requests_counter,
+                    request_phase,
+                    cancel_signal,
+                )
             # Update worker concurrency for concurrent load type
-            if self.load_type == LoadType.CONCURRENT and isinstance(stage, ConcurrentLoadStage):
+            elif self.load_type == LoadType.CONCURRENT and isinstance(stage, ConcurrentLoadStage):
                 logger.debug(f"Setting worker concurrency to {stage.concurrency_level} for stage {stage_id}")
                 self._set_worker_concurrency(stage.concurrency_level)
 
@@ -545,24 +711,36 @@ class LoadGenerator:
                 rate = getattr(stage, "rate", stage.num_requests)
                 duration = getattr(stage, "duration", 1)
                 concurrency_level = stage.concurrency_level
+                
+                await self.run_stage(
+                    stage_id,
+                    rate,
+                    duration,
+                    request_queue,
+                    active_requests_counter,
+                    finished_requests_counter,
+                    request_phase,
+                    cancel_signal,
+                    concurrency_level=concurrency_level,
+                )
             elif self.load_type != LoadType.CONCURRENT and isinstance(stage, StandardLoadStage):
                 rate = stage.rate
                 duration = stage.duration
                 concurrency_level = None
+                
+                await self.run_stage(
+                    stage_id,
+                    rate,
+                    duration,
+                    request_queue,
+                    active_requests_counter,
+                    finished_requests_counter,
+                    request_phase,
+                    cancel_signal,
+                    concurrency_level=concurrency_level,
+                )
             else:
                 raise Exception(f"Stage {stage_id} has the wrong load type")
-
-            await self.run_stage(
-                stage_id,
-                rate,
-                duration,
-                request_queue,
-                active_requests_counter,
-                finished_requests_counter,
-                request_phase,
-                cancel_signal,
-                concurrency_level=concurrency_level,
-            )
             # If we encountered a SIGINT, we can break out of run stages loop
             if self.interrupt_sig:
                 break

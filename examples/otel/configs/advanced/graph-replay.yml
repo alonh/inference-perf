@@ -1,0 +1,58 @@
+# OTel Replay Graph Configuration with Mock Server
+# This configuration tests the full replay flow using pre-generated replay graphs
+
+api:
+  type: chat
+  streaming: false
+
+data:
+  type: otel_trace_replay
+  otel_trace_replay:
+    # Directory containing replay graph JSON files
+    trace_directory: "examples/trace-replay/otel/test_traces/advanced/output"
+    
+    # Concurrency settings - test with just 1 session for simplicity
+    concurrent_sessions: 1
+    session_start_delay_sec: 0.0
+    time_scale: 10.0  # Run 10x faster for quick testing
+    
+    # Model configuration - use static model
+    use_static_model: true
+    static_model_name: "test-model"
+    
+    # Request settings
+    default_max_tokens: 100
+    
+    # Dependency inference settings (not used for graph files, but kept for compatibility)
+    dependency_window_ms: 120000
+    max_dependencies_per_event: 3
+    
+    # Error handling
+    include_errors: true
+    skip_invalid_files: true
+    validate_dependencies: true
+
+load:
+  type: constant
+  stages:
+    - rate: 10.0  # High rate since we're running 10x faster
+      duration: 10  # Short duration for quick test
+  num_workers: 2
+  worker_max_concurrency: 10
+
+server:
+  type: mock  # Use mock server for testing
+  base_url: "http://localhost:8000"
+  model_name: "test-model"
+
+storage:
+  local_storage:
+    path: "reports-otel-graph-replay-mock"
+
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: false
+
+# Made with Bob

@@ -1,0 +1,67 @@
+# OTel Trace Replay with Session-Based Load Configuration
+# This demonstrates the new TRACE_SESSION_REPLAY load type which dispatches
+# entire trace sessions instead of individual events.
+
+api:
+  type: chat
+  streaming: false
+
+data:
+  type: otel_trace_replay
+  otel_trace_replay:
+    trace_directory: "examples/trace-replay/otel/test_traces/advanced"
+    
+    # Session configuration
+    concurrent_sessions: 0  # 0 = replay all sessions (controlled by load config)
+    session_start_delay_sec: 0.0
+    time_scale: 1.0  # Real-time replay
+    
+    # Model configuration
+    use_static_model: true
+    static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+    default_max_tokens: 100
+    
+    # Dependency settings
+    dependency_window_ms: 120000
+    max_dependencies_per_event: 3
+    include_errors: false
+    skip_invalid_files: true
+    validate_dependencies: true
+
+load:
+  type: trace_session_replay  # New load type for session-based dispatch
+  
+  # Option 1: Rate-based mode - start N sessions per second for a duration
+  stages:
+  - session_rate: 2.0    # Start 2 trace sessions per second
+    duration: 30         # For 30 seconds
+    # Total: ~60 session replays
+  
+  # Option 2: Count-based mode - replay N total sessions with max concurrency
+  # stages:
+  # - num_sessions: 100           # Replay 100 sessions total
+  #   max_concurrent_sessions: 10  # Up to 10 concurrent sessions
+  
+  # Worker configuration
+  num_workers: 1
+  worker_max_concurrency: 10
+
+server:
+  type: vllm
+  base_url: "http://localhost:8000"
+  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+tokenizer:
+  pretrained_model_name_or_path: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+storage:
+  local_storage:
+    path: "reports-otel-session-replay"
+
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: false
+
+# Made with Bob
