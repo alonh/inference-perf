@@ -9,7 +9,7 @@ data:
   type: otel_trace_replay
   otel_trace_replay:
     # Directory containing OTel JSON trace files
-    trace_directory: "examples/trace-replay/otel/test_traces/advanced"
+    trace_directory: "examples/otel/test_traces/advanced"
     
     # Concurrency settings - test with just 1 session for simplicity
     concurrent_sessions: 1

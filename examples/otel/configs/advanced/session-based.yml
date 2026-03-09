@@ -9,7 +9,7 @@ api:
 data:
   type: otel_trace_replay
   otel_trace_replay:
-    trace_directory: "examples/trace-replay/otel/test_traces/advanced"
+    trace_directory: "examples/otel/test_traces/advanced"
     
     # Session configuration
     concurrent_sessions: 0  # 0 = replay all sessions (controlled by load config)

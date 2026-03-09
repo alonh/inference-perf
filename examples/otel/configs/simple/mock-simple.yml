@@ -9,7 +9,7 @@ data:
   type: otel_trace_replay
   otel_trace_replay:
     # Use only simple_chain.json for testing
-    trace_directory: "examples/trace-replay/otel/test_traces/simple"
+    trace_directory: "examples/otel/test_traces/simple"
     
     # Single session, no concurrency
     concurrent_sessions: 1
