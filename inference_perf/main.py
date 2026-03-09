@@ -103,13 +103,13 @@ class InferencePerfRunner:
 def main_cli() -> None:
     # Set multiprocessing start method to 'fork' on macOS to avoid pickle issues
     # This must be done before any multiprocessing operations
-    if sys.platform == 'darwin':  # macOS
+    if sys.platform == "darwin":  # macOS
         try:
-            mp.set_start_method('fork', force=True)
+            mp.set_start_method("fork", force=True)
         except RuntimeError:
             # Start method already set, ignore
             pass
-    
+
     # Parse command line arguments
     parser = ArgumentParser()
     parser.add_argument("-c", "--config_file", help="Config File", required=False)

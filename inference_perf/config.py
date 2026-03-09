@@ -99,10 +99,26 @@ class OTelTraceReplayConfig(BaseModel):
     trace_file: Optional[str] = Field(None, description="Path to a specific OTel JSON trace file")
 
     # Concurrency and timing
-    concurrent_sessions: int = Field(1, ge=0, description="Number of sessions to replay concurrently (0 = all)")
-    session_start_delay_sec: float = Field(0.0, ge=0.0, description="Delay between session starts in seconds")
+    concurrent_sessions: int = Field(
+        1,
+        ge=0,
+        description=(
+            "Maximum number of sessions active simultaneously. "
+            "0 = all sessions active at once. "
+            "N > 0 = at most N sessions active; when one completes, next is activated. "
+            "Sessions are processed to completion (no cycling)."
+        ),
+    )
+    session_start_delay_sec: float = Field(
+        0.0, ge=0.0, description="[DEPRECATED] Not used with graph-based traversal"
+    )
     time_scale: float = Field(
         1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)"
+    )
+    
+    # Graph traversal mode
+    use_graph_traversal: bool = Field(
+        True, description="Use graph-based traversal instead of time-based sorting"
     )
 
     # Model configuration
