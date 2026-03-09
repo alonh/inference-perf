@@ -95,12 +95,15 @@ class SharedPrefix(BaseModel):
 class OTelTraceReplayConfig(BaseModel):
     """Configuration for OTel trace replay data generator."""
 
-    trace_directory: str = Field(..., description="Directory containing OTel JSON trace files")
+    trace_directory: Optional[str] = Field(None, description="Directory containing OTel JSON trace files")
+    trace_file: Optional[str] = Field(None, description="Path to a specific OTel JSON trace file")
 
     # Concurrency and timing
     concurrent_sessions: int = Field(1, ge=0, description="Number of sessions to replay concurrently (0 = all)")
     session_start_delay_sec: float = Field(0.0, ge=0.0, description="Delay between session starts in seconds")
-    time_scale: float = Field(1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)")
+    time_scale: float = Field(
+        1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)"
+    )
 
     # Model configuration
     use_static_model: bool = Field(False, description="Use a single static model for all requests")
@@ -121,6 +124,13 @@ class OTelTraceReplayConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_static_model(self) -> "OTelTraceReplayConfig":
+        # Validate that exactly one of trace_directory or trace_file is provided
+        if not self.trace_directory and not self.trace_file:
+            raise ValueError("Either trace_directory or trace_file must be provided")
+        if self.trace_directory and self.trace_file:
+            raise ValueError("Cannot specify both trace_directory and trace_file; choose one")
+
+        # Validate static model configuration
         if self.use_static_model and not self.static_model_name:
             raise ValueError("static_model_name is required when use_static_model=True")
         if not self.use_static_model and self.static_model_name and not self.model_mapping:
@@ -241,14 +251,12 @@ class TraceSessionReplayLoadStage(LoadStage):
 
         if not rate_mode and not count_mode:
             raise ValueError(
-                "Must specify either (session_rate + duration) for rate-based mode "
-                "or (num_sessions) for count-based mode"
+                "Must specify either (session_rate + duration) for rate-based mode or (num_sessions) for count-based mode"
             )
 
         if rate_mode and count_mode:
             raise ValueError(
-                "Cannot specify both rate-based (session_rate + duration) and "
-                "count-based (num_sessions) modes simultaneously"
+                "Cannot specify both rate-based (session_rate + duration) and count-based (num_sessions) modes simultaneously"
             )
 
         # Validate that unused fields are not set
@@ -412,6 +420,18 @@ class Config(BaseModel):
     server: Optional[ModelServerClientConfig] = None
     tokenizer: Optional[CustomTokenizerConfig] = None
     circuit_breakers: Optional[List[CircuitBreakerConfig]] = None
+
+    @model_validator(mode="after")
+    def validate_otel_trace_replay_load_type(self) -> "Config":
+        """Validate that otel_trace_replay data type uses trace_session_replay load type."""
+        if self.data.type == DataGenType.OTelTraceReplay:
+            if self.load.type != LoadType.TRACE_SESSION_REPLAY:
+                raise ValueError(
+                    f"data.type 'otel_trace_replay' requires load.type 'trace_session_replay', "
+                    f"but got '{self.load.type.value}'. OTel trace replay with dependencies requires "
+                    f"session-based load dispatch to properly handle event dependencies and timing."
+                )
+        return self
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

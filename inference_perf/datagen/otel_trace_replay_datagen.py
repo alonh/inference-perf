@@ -469,13 +469,35 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             raise ValueError("otel_trace_replay configuration is required for OTelTraceReplayDataGenerator")
         
         self.otel_config = config.otel_trace_replay
-        self.trace_dir = Path(self.otel_config.trace_directory)
         
-        if not self.trace_dir.exists():
-            raise ValueError(f"Trace directory does not exist: {self.trace_dir}")
-        
-        if not self.trace_dir.is_dir():
-            raise ValueError(f"Trace directory path is not a directory: {self.trace_dir}")
+        # Determine if we're loading from a directory or a single file
+        if self.otel_config.trace_directory:
+            self.trace_dir = Path(self.otel_config.trace_directory)
+            self.single_file_mode = False
+            
+            if not self.trace_dir.exists():
+                raise ValueError(f"Trace directory does not exist: {self.trace_dir}")
+            
+            if not self.trace_dir.is_dir():
+                raise ValueError(f"Trace directory path is not a directory: {self.trace_dir}")
+        elif self.otel_config.trace_file:
+            # Single file mode
+            self.trace_file = Path(self.otel_config.trace_file)
+            self.single_file_mode = True
+            
+            if not self.trace_file.exists():
+                raise ValueError(f"Trace file does not exist: {self.trace_file}")
+            
+            if not self.trace_file.is_file():
+                raise ValueError(f"Trace file path is not a file: {self.trace_file}")
+            
+            if not self.trace_file.suffix == '.json':
+                raise ValueError(f"Trace file must be a JSON file: {self.trace_file}")
+            
+            # Set trace_dir to parent directory for consistency
+            self.trace_dir = self.trace_file.parent
+        else:
+            raise ValueError("Either trace_directory or trace_file must be provided in otel_trace_replay config")
 
         # Output registry: shared across all worker processes via mp.Manager().dict()
         # If mp_manager is None (single-process mode), falls back to a plain dict.
@@ -497,29 +519,48 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         )
     
     def _load_trace_files(self) -> None:
-        """Load and process all OTel JSON files from the trace directory."""
-        trace_files = sorted(self.trace_dir.glob("*.json"))
-        
-        if not trace_files:
-            logger.warning(f"No JSON files found in {self.trace_dir}")
-            return
-        
-        logger.info(f"Found {len(trace_files)} trace files in {self.trace_dir}")
-        
-        for file_index, trace_file in enumerate(trace_files):
+        """Load and process OTel JSON files from either a directory or a single file."""
+        if self.single_file_mode:
+            # Single file mode: load only the specified file
+            logger.info(f"Loading single trace file: {self.trace_file}")
             try:
-                session = self._process_trace_file(trace_file, file_index)
+                session = self._process_trace_file(self.trace_file, 0)
                 if session:
                     self.sessions.append(session)
                     node_count = len(session.graph.nodes)
                     logger.info(
-                        f"Loaded session {session.session_id} from {trace_file.name} "
+                        f"Loaded session {session.session_id} from {self.trace_file.name} "
                         f"with {node_count} nodes"
                     )
+                else:
+                    logger.warning(f"No valid session found in {self.trace_file}")
             except Exception as e:
-                logger.error(f"Failed to process trace file {trace_file}: {e}")
-                if not self.otel_config.skip_invalid_files:
-                    raise
+                logger.error(f"Failed to process trace file {self.trace_file}: {e}")
+                raise
+        else:
+            # Directory mode: load all JSON files from the directory
+            trace_files = sorted(self.trace_dir.glob("*.json"))
+            
+            if not trace_files:
+                logger.warning(f"No JSON files found in {self.trace_dir}")
+                return
+            
+            logger.info(f"Found {len(trace_files)} trace files in {self.trace_dir}")
+            
+            for file_index, trace_file in enumerate(trace_files):
+                try:
+                    session = self._process_trace_file(trace_file, file_index)
+                    if session:
+                        self.sessions.append(session)
+                        node_count = len(session.graph.nodes)
+                        logger.info(
+                            f"Loaded session {session.session_id} from {trace_file.name} "
+                            f"with {node_count} nodes"
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to process trace file {trace_file}: {e}")
+                    if not self.otel_config.skip_invalid_files:
+                        raise
     
     def _process_trace_file(self, trace_file: Path, file_index: int) -> Optional[OTelTraceSession]:
         """Process a single OTel JSON trace file into a ReplayGraph session."""
