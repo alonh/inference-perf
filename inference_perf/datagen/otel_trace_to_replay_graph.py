@@ -118,7 +118,7 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
             result = json.loads(raw)
             return result if isinstance(result, list) else []
         except Exception:
-            return [{"role": "user", "content": raw}]
+            raise ValueError(f"Failed to parse messages JSON: {raw}")
     return []
 
 
