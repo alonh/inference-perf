@@ -18,7 +18,7 @@ data:
     
     # Model configuration - use static model
     use_static_model: true
-    static_model_name: "test-model"
+    static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
     
     # Request settings
     default_max_tokens: 100000

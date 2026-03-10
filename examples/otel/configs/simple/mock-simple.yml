@@ -31,12 +31,13 @@ data:
     validate_dependencies: true
 
 load:
-  type: constant
+  type: trace_session_replay  # Session-based replay
   stages:
-    - rate: 1.0  # 1 request per second
-      duration: 5  # 5 seconds total
-  num_workers: 1  # Single worker to avoid deadlock
-  worker_max_concurrency: 1
+    - session_rate: 1.0  # Start 1 session per second
+      duration: 10       # For 10 seconds
+      max_concurrent_sessions: 1  # Max 1 concurrent session
+  num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
+  worker_max_concurrency: 10
 
 server:
   type: mock

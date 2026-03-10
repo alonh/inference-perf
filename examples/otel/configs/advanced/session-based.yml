@@ -29,21 +29,12 @@ data:
     validate_dependencies: true
 
 load:
-  type: trace_session_replay  # New load type for session-based dispatch
-  
-  # Option 1: Rate-based mode - start N sessions per second for a duration
+  type: trace_session_replay  # Session-based replay
   stages:
-  - session_rate: 2.0    # Start 2 trace sessions per second
-    duration: 30         # For 30 seconds
-    # Total: ~60 session replays
-  
-  # Option 2: Count-based mode - replay N total sessions with max concurrency
-  # stages:
-  # - num_sessions: 100           # Replay 100 sessions total
-  #   max_concurrent_sessions: 10  # Up to 10 concurrent sessions
-  
-  # Worker configuration
-  num_workers: 1
+    - session_rate: 1.0  # Start 1 session per second
+      duration: 10       # For 10 seconds
+      max_concurrent_sessions: 1  # Max 1 concurrent session
+  num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
   worker_max_concurrency: 10
 
 server:
