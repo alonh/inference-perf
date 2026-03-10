@@ -349,7 +349,7 @@ def test_parallel_fan_out() -> None:
     EXPECTED GRAPH (one node per call):
         node_000 (ROOT)
         node_001 (P1)    predecessor_node_ids=["node_000"]  (timing fallback)
-        node_002 (P2)    predecessor_node_ids=["node_001"]  (timing fallback)
+        node_002 (P2)    predecessor_node_ids=["node_000"]  (timing fallback)
         node_003 (FINAL) predecessor_node_ids=["node_001", "node_002"]  (causal: P1+P2 outputs)
 
     EXPECTED SEGMENTS for span_FINAL:
@@ -395,6 +395,9 @@ def test_parallel_fan_out() -> None:
 
     # ROOT has no predecessors
     assert node_000.predecessor_node_ids == []
+
+    assert node_001.predecessor_node_ids == node_002.predecessor_node_ids, \
+        "node_001 and node_002 are run in parallel and have the same predecessor"
 
     # span_FINAL should have OUTPUT segments from P1 and P2
     segs_final = node_003.call.input_segments
@@ -606,3 +609,4 @@ def test_growing_prefix() -> None:
 
 
 # Made with Bob
+

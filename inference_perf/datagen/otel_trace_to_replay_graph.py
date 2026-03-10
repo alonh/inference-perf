@@ -499,6 +499,14 @@ def build_graph(
                     stack.extend(predecessor_indices[node])
         return False
 
+    def is_valid_predecessor(predecessor_candidate, curr_call):
+        #checks if candidate can be a predecessor to curr_call. Make sure times are not overlapping
+        #since the nodes are sorted, we can assume the candidate doesn't start after curr_call
+        if curr_call.t_start_ms < predecessor_candidate.t_end_ms:
+            # curr starts before the candidate ends.
+            return False
+        return True
+
     for i in range(1, n):
         # Collect all calls that causally feed call i
         causal_preds: List[int] = []
@@ -514,8 +522,13 @@ def build_graph(
             predecessor_indices[i] = direct_preds
             is_causal_edge[i] = True
         else:
-            # No causal predecessor — use the immediately preceding call as timing fallback
-            predecessor_indices[i] = [i - 1]
+            predecessor_index = 0 #default value - the predecessor is the first node
+            # No causal predecessor — look for the closest possible predecessor. It's not necessaritly the immediate predecessor, as they can be executed in parallel
+            for j in range(i-1, -1, -1):
+                if is_valid_predecessor(calls[j], calls[i]):
+                    predecessor_index = j
+                    break
+            predecessor_indices[i] = [predecessor_index]
             is_causal_edge[i] = False
 
     # ---------------------------------------------------------------------------
