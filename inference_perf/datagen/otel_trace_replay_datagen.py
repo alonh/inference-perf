@@ -282,62 +282,85 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 for m in substituted
             ]
             logger.debug(f"Node {self.node_id} substitution complete, {len(self.messages)} messages")
-    
+
     def _build_messages_with_substitution(self) -> List[Dict[str, Any]]:
         """Build messages with output segments substituted with actual predecessor outputs.
-        
-        Returns:
-            List of message dicts with "output" segments replaced by actual LLM outputs
+
+        For assistant messages, we substitute their output messages with the actual output.
         """
         if not self.input_segments:
             return self.original_messages
-        
+
         result = []
         cursor = 0
-        
+
+        def _get_seg_message_id(seg, msg_idx):
+            return f"{seg.source_node_id[:-3]}:msg_{msg_idx}"
+
         for seg in self.input_segments:
-            # Get the messages for this segment
             seg_msgs = self.original_messages[cursor:cursor + seg.message_count]
-            
-            if seg.type in ("shared", "unique"):
-                # Keep these messages as-is
-                result.extend(seg_msgs)
-            elif seg.type == "output":
-                # Substitute with actual output from predecessor
-                if seg.source_node_id is None:
+
+            if seg.type == "output":
+                # Output segment: substitute with actual output from the specific predecessor
+                if seg.source_node_id:
+                    message_id = _get_seg_message_id(seg,cursor)
+                    actual_output = self.registry.get(message_id)
+                    logger.info(f"Registry get output for output seg for {message_id}: {actual_output}")
+                    if actual_output:
+                        for msg in seg_msgs:
+                            substituted = dict(msg)
+                            substituted["content"] = actual_output
+                            result.append(substituted)
+                        logger.debug(
+                            f"Node {self.node_id}: substituted output segment "
+                            f"with actual output from {seg.source_node_id}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Node {self.node_id}: output segment from {seg.source_node_id} "
+                            f"not available, using recorded content"
+                        )
+                        result.extend(seg_msgs)
+                else:
                     logger.warning(
                         f"Node {self.node_id}: output segment has no source_node_id, "
                         f"using recorded content"
                     )
                     result.extend(seg_msgs)
-                    cursor += seg.message_count
-                    continue
-                
-                actual_output = self.registry.get(seg.source_node_id)
-                if actual_output is None:
-                    # Fallback to original if not available (shouldn't happen after wait)
-                    logger.warning(
-                        f"Node {self.node_id}: output segment from {seg.source_node_id} "
-                        f"not available, using recorded content"
-                    )
-                    result.extend(seg_msgs)
-                else:
-                    # Replace each message in this segment with the actual output
-                    for msg in seg_msgs:
-                        substituted = dict(msg)
-                        substituted["content"] = actual_output
-                        result.append(substituted)
-                    logger.debug(
-                        f"Node {self.node_id}: substituted {seg.message_count} message(s) "
-                        f"from {seg.source_node_id} with {len(actual_output)} chars"
-                    )
+            elif seg.type in ("shared", "unique"):
+                # For shared/unique segments, check each message
+                for msg_idx, msg in enumerate(seg_msgs):
+                    if msg.get("role") == "assistant":
+                        message_id = _get_seg_message_id(seg, cursor + msg_idx)
+                        actual_output = self.registry.get(message_id)
+                        logger.info(f"Registry get output for assistant seg for {message_id}: {actual_output}")
+                        if actual_output:
+                            # Found the actual output for this recorded content
+                            new_msg = dict(msg)
+                            new_msg["content"] = actual_output
+                            result.append(new_msg)
+                            logger.debug(
+                                f"Node {self.node_id}: substituted assistant message "
+                                f"in {seg.type} segment by content lookup"
+                            )
+                        else:
+                            # No match found, keep original
+                            result.append(msg)
+                            logger.debug(
+                                f"Node {self.node_id}: no content match for assistant message "
+                                f"in {seg.type} segment, keeping original"
+                            )
+                    else:
+                        # Non-assistant message, keep as-is
+                        result.append(msg)
             else:
                 # Unknown segment type, keep as-is
                 result.extend(seg_msgs)
-            
+
             cursor += seg.message_count
-        
+
         return result
+
     
     def register_mock_completion(self, output_text: str = "") -> None:
         """Register a completion for mock/test scenarios.
@@ -431,7 +454,8 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         # Always register something (even empty string) so dependent nodes don't wait forever.
         output_to_register = output_text or ""
         self.registry.record(self.node_id, output_to_register)
-        
+        self.registry.record(f"{self.node_id[:-3]}:msg_{len(self.messages)}", output_to_register)
+
         # Notify generator of completion for graph traversal
         if self.completion_callback:
             logger.info(f"Calling completion callback for node {self.node_id} from process_response")
