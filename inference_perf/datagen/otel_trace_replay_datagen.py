@@ -64,6 +64,10 @@ from inference_perf.utils.custom_tokenizer import CustomTokenizer
 logger = logging.getLogger(__name__)
 
 
+def _get_seg_message_id(node_id, msg_idx):
+    logger.debug(f"Node {node_id} msg_idx {msg_idx}")
+    return f"{node_id}:msg_{msg_idx}"
+
 # ---------------------------------------------------------------------------
 # SessionGraphState — tracks graph traversal state for one session
 # ---------------------------------------------------------------------------
@@ -294,16 +298,13 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         result = []
         cursor = 0
 
-        def _get_seg_message_id(seg, msg_idx):
-            return f"{seg.source_node_id[:-3]}:msg_{msg_idx}"
-
         for seg in self.input_segments:
             seg_msgs = self.original_messages[cursor:cursor + seg.message_count]
 
             if seg.type == "output":
                 # Output segment: substitute with actual output from the specific predecessor
                 if seg.source_node_id:
-                    message_id = _get_seg_message_id(seg,cursor)
+                    message_id = _get_seg_message_id(seg.source_node_id, cursor)
                     actual_output = self.registry.get(message_id)
                     logger.info(f"Registry get output for output seg for {message_id}: {actual_output}")
                     if actual_output:
@@ -329,11 +330,14 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                     result.extend(seg_msgs)
             elif seg.type in ("shared", "unique"):
                 # For shared/unique segments, check each message
+                assistant_message_idx = 0
                 for msg_idx, msg in enumerate(seg_msgs):
                     if msg.get("role") == "assistant":
-                        message_id = _get_seg_message_id(seg, cursor + msg_idx)
+                        logger.debug(f"Node {self.node_id}: assistant msg_idx {msg_idx}, cursor {cursor} : predecessors {self.predecessor_node_ids}")
+                        message_id = _get_seg_message_id(self.predecessor_node_ids[assistant_message_idx], cursor + msg_idx)
                         actual_output = self.registry.get(message_id)
                         logger.info(f"Registry get output for assistant seg for {message_id}: {actual_output}")
+                        assistant_message_idx += 1
                         if actual_output:
                             # Found the actual output for this recorded content
                             new_msg = dict(msg)
@@ -454,7 +458,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         # Always register something (even empty string) so dependent nodes don't wait forever.
         output_to_register = output_text or ""
         self.registry.record(self.node_id, output_to_register)
-        self.registry.record(f"{self.node_id[:-3]}:msg_{len(self.messages)}", output_to_register)
+        self.registry.record(_get_seg_message_id(self.node_id, len(self.messages)), output_to_register)
 
         # Notify generator of completion for graph traversal
         if self.completion_callback:
@@ -467,7 +471,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         
         if output_text:
             logger.debug(
-                f"Registered output for node {self.node_id}: {len(output_text)} chars"
+                f"Registered output for node {self.node_id}: {len(output_text)} chars : {output_text}"
             )
         else:
             logger.debug(f"Registered empty output for node {self.node_id}")
@@ -684,7 +688,26 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             file_index=file_index,
             graph=graph,
         )
-    
+
+    def _get_all_ancestors(self, node_id: str, graph_nodes: Dict[str, GraphNode], session_id: str) -> List[str]:
+        """Recursively get all ancestor node IDs from a node to the root."""
+        ancestors = []
+        visited = set()
+
+        def traverse(nid: str):
+            if nid in visited:
+                return
+            visited.add(nid)
+
+            node = graph_nodes.get(nid)
+            if node:
+                for pred_id in node.predecessor_node_ids:
+                    traverse(pred_id)
+                    ancestors.append(f"{session_id}:{pred_id}")
+
+        traverse(node_id)
+        return ancestors
+
     def _build_replay_schedule(self) -> None:
         """Build the replay schedule using graph traversal (no time-based sorting).
         
@@ -720,7 +743,11 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
                 qualified_predecessor_ids = [
                     f"{session.session_id}:{pid}" for pid in node.predecessor_node_ids
                 ]
-                
+                print("XXX orig preds", node.node_id , ":::", qualified_predecessor_ids)
+
+                qualified_predecessor_ids = self._get_all_ancestors(node.node_id, session.graph.nodes, session.session_id)
+                print("XXX recursive preds", node.node_id , ":::", qualified_predecessor_ids)
+
                 # Rewrite source_node_id in input_segments
                 qualified_segments = [
                     dc_replace(seg, source_node_id=f"{session.session_id}:{seg.source_node_id}")
