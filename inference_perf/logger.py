@@ -29,7 +29,7 @@ def setup_logging(level: str) -> None:
 
     logging.basicConfig(
         level=numeric_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
         force=True,
     )
