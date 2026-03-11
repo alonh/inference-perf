@@ -533,11 +533,12 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         mp_manager: Optional[SyncManager] = None,
     ) -> None:
         super().__init__(api_config, config, tokenizer)
-        
+
         if not hasattr(config, 'otel_trace_replay') or config.otel_trace_replay is None:
             raise ValueError("otel_trace_replay configuration is required for OTelTraceReplayDataGenerator")
-        
+
         self.otel_config = config.otel_trace_replay
+        self.mp_manager = mp_manager
         
         # Determine if we're loading from a directory or a single file
         if self.otel_config.trace_directory:
@@ -571,11 +572,18 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         # Output registry: shared across all worker processes via mp.Manager().dict()
         # If mp_manager is None (single-process mode), falls back to a plain dict.
         self.output_registry = NodeOutputRegistry(manager=mp_manager)
-        
+
+        # Shared session-node completion tracker for cross-process coordination
+        # Maps qualified_node_id -> completion_time (shared via Manager)
+        if mp_manager is not None:
+            self._shared_node_completions: Dict[str, float] = mp_manager.dict()  # type: ignore[assignment]
+        else:
+            self._shared_node_completions = {}
+
         # Load and process all OTel trace files
         self.sessions: List[OTelTraceSession] = []
         self._load_trace_files()
-        
+
         # Session pool management for graph-based traversal
         self.session_graph_state: Dict[str, SessionGraphState] = {}
         self.active_session_ids: Set[str] = set()
@@ -863,23 +871,23 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         return result
 
     def get_request_count(self) -> int:
-        """Return total number of requests to replay based on active/pending sessions.
+        """Return total number of requests to replay from active sessions only.
         
-        This counts only the events from sessions that will actually be replayed,
-        not all events from all loaded trace files.
+        Only counts events from currently active sessions, not pending ones.
+        Pending sessions will be activated later and their events yielded in subsequent calls.
         """
-        # Count events from active and pending sessions
+        # Count events from active sessions only
         total_events = 0
-        sessions_to_count = self.active_session_ids | set(self.pending_session_ids)
         
-        for session_id in sessions_to_count:
+        for session_id in self.active_session_ids:
             state = self.session_graph_state.get(session_id)
             if state:
                 total_events += len(state.graph.nodes)
         
         logger.info(
-            f"get_request_count: {total_events} events across "
-            f"{len(self.active_session_ids)} active + {len(self.pending_session_ids)} pending sessions"
+            f"get_request_count: {total_events} events from "
+            f"{len(self.active_session_ids)} active session(s) "
+            f"({len(self.pending_session_ids)} pending)"
         )
         
         return total_events
@@ -1030,10 +1038,14 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             f"{len(self.pending_session_ids)} pending, {len(self.completed_session_ids)} completed"
         )
         
-        # Collect all sessions to replay (active + pending)
-        sessions_to_replay = list(self.active_session_ids) + self.pending_session_ids
+        # Only yield events from active sessions (not pending)
+        # Pending sessions will be activated when current sessions complete
+        sessions_to_replay = list(self.active_session_ids)
         
-        logger.info(f"Yielding all events from {len(sessions_to_replay)} session(s)")
+        logger.info(
+            f"Yielding all events from {len(sessions_to_replay)} active session(s) "
+            f"({len(self.pending_session_ids)} pending)"
+        )
         
         # Yield all events from these sessions
         # Events are already in self.all_events, filtered by session
@@ -1068,109 +1080,60 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
 
     
     def _on_node_completed(self, qualified_node_id: str, completion_time: float) -> None:
-        """Called when a node completes. Updates state and activates successors.
-        
-        If this was the last node in a session, marks session as complete and
-        activates the next pending session.
+        """Called when a node completes. Records completion in shared state.
+
+        This is called from worker processes, so we only update the shared
+        completion tracker (_shared_node_completions). The main process will
+        check this tracker and manage session activation/completion.
         """
         logger.info(f"_on_node_completed called for {qualified_node_id}")
-        
-        # Parse session_id and node_id
-        try:
-            session_id, node_id = qualified_node_id.split(":", 1)
-        except ValueError:
-            logger.error(f"Invalid qualified_node_id format: {qualified_node_id}")
-            return
-        
-        logger.info(f"Parsed: session_id={session_id}, node_id={node_id}")
-        
-        state = self.session_graph_state.get(session_id)
-        if not state:
-            logger.error(f"Unknown session_id: {session_id}")
-            return
-        
-        logger.info(f"Found state for session {session_id}")
-        
-        # Mark node as completed
-        state.completed_nodes.add(node_id)
-        state.node_completion_times[node_id] = completion_time
-        
-        logger.info(
-            f"Node completed: {node_id} in session {session_id} "
-            f"({len(state.completed_nodes)}/{len(state.graph.nodes)} nodes done)"
-        )
-        
-        # Check if session is now complete
-        if len(state.completed_nodes) == len(state.graph.nodes):
-            logger.info(
-                f"Session {session_id} completed all {len(state.graph.nodes)} nodes"
-            )
-            state.is_complete = True
-            self.completed_session_ids.add(session_id)
-            self.active_session_ids.discard(session_id)
-            
-            # Activate next pending session
-            self._activate_next_pending_session()
-        else:
-            # Find and activate successors
-            self._activate_successors(session_id, node_id)
-    
-    def _activate_successors(self, session_id: str, completed_node_id: str) -> None:
-        """Find and activate successor nodes after a node completes."""
-        logger.info(f"_activate_successors called for session={session_id}, completed_node={completed_node_id}")
-        
-        state = self.session_graph_state[session_id]
-        
-        successors_activated = 0
-        # For each node in the graph, check if this completion unblocks it
-        for potential_successor_id, potential_successor in state.graph.nodes.items():
-            if potential_successor_id in state.dispatched_nodes:
-                continue  # Already dispatched
-            
-            # Check if this node lists the completed node as a predecessor
-            if completed_node_id in potential_successor.predecessor_node_ids:
-                logger.info(f"Node {potential_successor_id} has {completed_node_id} as predecessor")
-                
-                # Check if ALL predecessors are now complete
-                all_preds_done = all(
-                    pred_id in state.completed_nodes
-                    for pred_id in potential_successor.predecessor_node_ids
-                )
-                
+
+        # Record completion in shared dict (visible across all processes)
+        self._shared_node_completions[qualified_node_id] = completion_time
+        logger.info(f"Recorded completion for {qualified_node_id} in shared tracker")
+
+    def check_and_update_session_completions(self) -> int:
+        """Check shared completion tracker and update session states.
+
+        This should be called from the main process (load generator) to poll
+        for completed sessions and activate pending ones.
+
+        Returns:
+            Number of sessions that completed in this check
+        """
+        newly_completed = 0
+
+        for session_id in list(self.active_session_ids):
+            state = self.session_graph_state[session_id]
+
+            # Check which nodes in this session have completed
+            for node_id in state.graph.nodes.keys():
+                qualified_node_id = f"{session_id}:{node_id}"
+                if qualified_node_id in self._shared_node_completions:
+                    if node_id not in state.completed_nodes:
+                        # Newly completed node
+                        completion_time = self._shared_node_completions[qualified_node_id]
+                        state.completed_nodes.add(node_id)
+                        state.node_completion_times[node_id] = completion_time
+
+            # Check if session is now complete
+            if len(state.completed_nodes) == len(state.graph.nodes) and not state.is_complete:
                 logger.info(
-                    f"Node {potential_successor_id}: all_preds_done={all_preds_done}, "
-                    f"predecessors={potential_successor.predecessor_node_ids}, "
-                    f"completed={state.completed_nodes}"
+                    f"Session {session_id} completed all {len(state.graph.nodes)} nodes"
                 )
-                
-                if all_preds_done:
-                    # Add to ready queue
-                    state.ready_nodes.add(potential_successor_id)
-                    successors_activated += 1
+                state.is_complete = True
+                self.completed_session_ids.add(session_id)
+                self.active_session_ids.discard(session_id)
+                newly_completed += 1
+
+                # Activate next pending session
+                if self.pending_session_ids:
+                    next_session_id = self.pending_session_ids.pop(0)
                     logger.info(
-                        f"Node {potential_successor_id} is now ready "
-                        f"(all {len(potential_successor.predecessor_node_ids)} predecessors complete)"
+                        f"Activating next session: {next_session_id} "
+                        f"({len(self.pending_session_ids)} remaining in queue)"
                     )
-        
-        logger.info(f"Activated {successors_activated} successor(s) for session {session_id}")
-    
-    def _activate_next_pending_session(self) -> None:
-        """Activate the next pending session if any."""
-        if not self.pending_session_ids:
-            logger.info(
-                f"No more pending sessions. "
-                f"Active: {len(self.active_session_ids)}, "
-                f"Completed: {len(self.completed_session_ids)}/{len(self.sessions)}"
-            )
-            return
-        
-        # Get next pending session
-        next_session_id = self.pending_session_ids.pop(0)
-        
-        logger.info(
-            f"Activating next session: {next_session_id} "
-            f"({len(self.pending_session_ids)} remaining in queue)"
-        )
-        
-        # Activate it
-        self._activate_session(next_session_id)
+                    self._activate_session(next_session_id)
+
+        return newly_completed
+

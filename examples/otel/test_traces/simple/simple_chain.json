@@ -1,11 +1,11 @@
 {
-  "trace_id": "test_trace_001",
+  "trace_id": "paris_conversation_chain_001",
   "span_count": 3,
   "collected_at": "2026-02-25T10:00:00.000000",
   "spans": [
     {
-      "trace_id": "test_trace_001",
-      "span_id": "span_001",
+      "trace_id": "paris_conversation_chain_001",
+      "span_id": "capital_question_001",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",
@@ -30,8 +30,8 @@
       }
     },
     {
-      "trace_id": "test_trace_001",
-      "span_id": "span_002",
+      "trace_id": "paris_conversation_chain_001",
+      "span_id": "landmarks_question_002",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",
@@ -56,8 +56,8 @@
       }
     },
     {
-      "trace_id": "test_trace_001",
-      "span_id": "span_003",
+      "trace_id": "paris_conversation_chain_001",
+      "span_id": "eiffel_tower_height_003",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",

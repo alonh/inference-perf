@@ -194,6 +194,7 @@ class Worker(mp.Process):
                 task = create_task(
                     schedule_client(self.request_queue, request_data, request_time, stage_id, semaphore, lora_adapter)
                 )
+                logging.info(f"creating inference task with request data {request_data}", extra={"request_data": request_data})
                 tasks.append(task)
                 await sleep(0)
 
@@ -335,6 +336,120 @@ class LoadGenerator:
         total_sessions = self.datagen.get_session_count()
         stage_status = StageStatus.RUNNING
 
+        # Check if this is OTel trace replay with concurrent_sessions management
+        # In this case, the data generator manages session activation, not the load generator
+        is_otel_managed_sessions = (
+            isinstance(self.datagen, OTelTraceReplayDataGenerator) and
+            self.datagen.otel_config.concurrent_sessions > 0
+        )
+
+        if is_otel_managed_sessions:
+            # OTel-managed mode: Data generator controls session activation based on completions
+            logger.info(
+                f"OTel-managed sessions mode: {self.datagen.otel_config.concurrent_sessions} "
+                f"concurrent sessions, {total_sessions} total sessions"
+            )
+
+            # Dispatch all events from initially active sessions
+            logger.info("Dispatching events from initially active sessions")
+            data_generator = self.datagen.get_data()
+            dispatched_count = 0
+            for request_data in data_generator:
+                lora_adapter = self._get_lora_adapter()
+                worker_id = request_data.prefered_worker_id
+                if worker_id >= 0:
+                    worker_id = worker_id % active_workers
+
+                event_time = time.perf_counter()
+                request_queue.put((stage_id, request_data, event_time, lora_adapter), worker_id)
+                dispatched_count += 1
+
+            logger.info(f"Dispatched {dispatched_count} events from initially active sessions")
+
+            # Track which sessions have been dispatched
+            dispatched_session_ids = set(self.datagen.active_session_ids)
+
+            # Calculate total expected requests across all sessions
+            total_expected_requests = sum(
+                len(self.datagen.get_session_event_indices(i)) for i in range(total_sessions)
+            )
+
+            logger.info(f"Waiting for all {total_expected_requests} requests across {total_sessions} sessions to complete...")
+
+            with tqdm(total=1.0, desc=f"Stage {stage_id} session progress") as pbar:
+                while finished_requests_counter.value < total_expected_requests:
+                    # Check for interrupts
+                    if self.interrupt_sig:
+                        pbar.close()
+                        logger.info("Loadgen encountered SIGINT")
+                        stage_status = StageStatus.FAILED
+                        break
+
+                    if cb := next((cb for cb in self.circuit_breakers if cb.is_open()), None):
+                        logger.warning(f'Loadgen detects circuit breakers "{cb.name}" open, exit the stage.')
+                        stage_status = StageStatus.FAILED
+                        break
+
+                    # Check for completed sessions and activate pending ones
+                    newly_completed = self.datagen.check_and_update_session_completions()
+                    if newly_completed > 0:
+                        logger.info(f"Detected {newly_completed} newly completed session(s)")
+
+                    # Check if new sessions were activated
+                    current_active_session_ids = set(self.datagen.active_session_ids)
+                    newly_activated = current_active_session_ids - dispatched_session_ids
+
+                    if newly_activated:
+                        logger.info(f"Dispatching events for newly activated sessions: {newly_activated}")
+
+                        # Get fresh data generator (yields events from currently active sessions)
+                        data_generator = self.datagen.get_data()
+                        newly_dispatched = 0
+                        for request_data in data_generator:
+                            lora_adapter = self._get_lora_adapter()
+                            worker_id = request_data.prefered_worker_id
+                            if worker_id >= 0:
+                                worker_id = worker_id % active_workers
+
+                            event_time = time.perf_counter()
+                            request_queue.put((stage_id, request_data, event_time, lora_adapter), worker_id)
+                            newly_dispatched += 1
+
+                        logger.info(f"Dispatched {newly_dispatched} events for newly activated sessions")
+                        dispatched_session_ids.update(newly_activated)
+
+                    await sleep(1)
+
+                    # Update progress
+                    prog = min(1.0, finished_requests_counter.value / max(1, total_expected_requests))
+                    pbar.update(prog - pbar.n)
+
+            # Mark stage as completed if we finished normally
+            if stage_status == StageStatus.RUNNING:
+                stage_status = StageStatus.COMPLETED
+
+            # Clear the request_phase event to force worker gather
+            request_phase.clear()
+            request_queue.join()
+
+            self.stage_runtime_info[stage_id] = StageRuntimeInfo(
+                stage_id=stage_id,
+                rate=0.0,  # Not rate-based in this mode
+                start_time=start_time_epoch,
+                end_time=time.time(),
+                status=stage_status,
+                concurrency_level=self.datagen.otel_config.concurrent_sessions,
+            )
+            logger.info(
+                "Stage %d - session-based run %s", stage_id, "completed" if stage_status == StageStatus.COMPLETED else "failed"
+            )
+            return
+
+        # Original session-based replay logic (rate-based or count-based)
+        # This path is used when concurrent_sessions is 0 (no session management)
+
+        # Original session-based replay logic (rate-based or count-based)
+        # This path is used when concurrent_sessions is 0 (no session management)
         # Determine mode and parameters
         if stage.session_rate is not None and stage.duration is not None:
             # Rate-based mode
@@ -403,9 +518,11 @@ class LoadGenerator:
                 session_event_indices = self.datagen.get_session_event_indices(sessions_started % total_sessions)
 
                 # Dispatch all events in this session
-                # Get a fresh data generator for each session
+                # Get a fresh data generator - this will yield events from currently active sessions
+                # For concurrent_sessions limiting, this ensures we get events from newly activated sessions
                 data_generator = self.datagen.get_data()
                 event_count = 0
+                dispatched_count = 0
                 for request_data in data_generator:
                     if event_count in session_event_indices:
                         lora_adapter = self._get_lora_adapter()
@@ -416,10 +533,11 @@ class LoadGenerator:
                         # Use event's scheduled time relative to session start
                         event_time = time.perf_counter()
                         request_queue.put((stage_id, request_data, event_time, lora_adapter), worker_id)
+                        dispatched_count += 1
 
                     event_count += 1
                     # Stop once we've dispatched all events for this session
-                    if event_count > max(session_event_indices):
+                    if dispatched_count >= len(session_event_indices):
                         break
 
                 sessions_started += 1
@@ -431,12 +549,14 @@ class LoadGenerator:
 
             # Wait for all requests to complete
             logger.info(f"Waiting for {num_sessions} sessions to complete...")
+
             while finished_requests_counter.value < sum(
                 len(self.datagen.get_session_event_indices(i % total_sessions)) for i in range(sessions_started)
             ):
                 if self.interrupt_sig:
                     stage_status = StageStatus.FAILED
                     break
+
                 await sleep(1)
                 # Update progress based on finished requests
                 total_expected = sum(
@@ -444,6 +564,10 @@ class LoadGenerator:
                 )
                 prog = min(1.0, finished_requests_counter.value / max(1, total_expected))
                 pbar.update(prog - pbar.n)
+
+        # Mark stage as completed if we finished normally
+        if stage_status == StageStatus.RUNNING:
+            stage_status = StageStatus.COMPLETED
 
         # Clear the request_phase event to force worker gather
         request_phase.clear()

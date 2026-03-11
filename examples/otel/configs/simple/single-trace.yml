@@ -12,7 +12,7 @@ data:
     trace_directory: "examples/otel/test_traces/simple"
     
     # Concurrency settings - controlled by load config
-    concurrent_sessions: 0  # 0 = all sessions (controlled by load stages)
+    concurrent_sessions: 1  # 0 = all sessions (controlled by load stages)
     session_start_delay_sec: 0.0
     time_scale: 1.0  # Real-time to avoid deadlocks with dependency waiting
     
@@ -37,8 +37,8 @@ load:
   stages:
     - session_rate: 1.0  # Start 1 session per second
       duration: 10       # For 10 seconds
-      max_concurrent_sessions: 1  # Max 1 concurrent session
-  num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
+      max_concurrent_sessions: 2  # Max 1 concurrent session
+  num_workers: 3
   worker_max_concurrency: 10
 
 server:
