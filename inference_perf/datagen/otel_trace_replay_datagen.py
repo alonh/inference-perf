@@ -588,23 +588,19 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         self.sessions: List[OTelTraceSession] = []
         self._load_trace_files()
 
-        # Session pool management for graph-based traversal
+        # Session state tracking (LoadGen controls which sessions are active)
         self.session_graph_state: Dict[str, SessionGraphState] = {}
-        self.active_session_ids: Set[str] = set()
-        self.pending_session_ids: List[str] = []
-        self.completed_session_ids: Set[str] = set()
-        self.max_active_sessions: int = self.otel_config.concurrent_sessions
-        
+
         # Event index mappings
         self.event_to_session: Dict[int, str] = {}  # event_idx → session_id
         self.event_to_node: Dict[int, str] = {}  # event_idx → node_id
-        
+
         if not self.sessions:
             raise ValueError(f"No valid OTel trace files found in {self.trace_dir}")
-        
+
         # Build flat list of all events across all sessions for replay
         self._build_replay_schedule()
-        
+
         logger.info(
             f"Loaded {len(self.sessions)} sessions with {len(self.all_events)} total events "
             f"from {self.trace_dir}"
@@ -780,36 +776,12 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         
         # NO SORTING - events accessed by index via mappings
         
-        # Initialize active session pool
-        self._initialize_session_pool()
-        
+
         logger.info(
             f"Built replay schedule: {len(self.all_events)} events across "
             f"{len(self.sessions)} sessions (graph-based traversal)"
         )
-    
-    def _initialize_session_pool(self) -> None:
-        """Initialize the active session pool based on concurrent_sessions config."""
-        
-        if self.max_active_sessions == 0:
-            # All sessions active simultaneously
-            logger.info(f"Activating all {len(self.sessions)} sessions simultaneously")
-            for session in self.sessions:
-                self._activate_session(session.session_id)
-        else:
-            # Limited active sessions
-            num_to_activate = min(self.max_active_sessions, len(self.sessions))
-            logger.info(f"Activating first {num_to_activate} of {len(self.sessions)} sessions")
-            
-            for i, session in enumerate(self.sessions):
-                if i < num_to_activate:
-                    self._activate_session(session.session_id)
-                else:
-                    self.pending_session_ids.append(session.session_id)
-            
-            if self.pending_session_ids:
-                logger.info(f"{len(self.pending_session_ids)} sessions pending activation")
-    
+
     def _activate_session(self, session_id: str) -> None:
         """Activate a session by marking it active and enabling root nodes."""
         state = self.session_graph_state[session_id]
@@ -978,6 +950,74 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             "start_offset_ms": session.start_offset_ms,
         }
 
+    def get_session_events(self, session_index: int) -> List[LazyLoadInferenceAPIData]:
+        """Get all events for a specific session as LazyLoadInferenceAPIData.
+
+        This is used by LoadGen to dispatch a session's events.
+
+        Args:
+            session_index: Index of the session (0-based)
+
+        Returns:
+            List of LazyLoadInferenceAPIData for this session's events
+        """
+        event_indices = self.get_session_event_indices(session_index)
+        return [LazyLoadInferenceAPIData(data_index=idx) for idx in event_indices]
+
+    def _activate_session_internal(self, session_id: str) -> None:
+        """Internal method to activate a session (mark nodes as ready).
+
+        This is called by LoadGen when it decides to start a session.
+        """
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning(f"Attempted to activate unknown session: {session_id}")
+            return
+
+        state.is_active = True
+
+        # Find and activate root nodes (no predecessors)
+        root_nodes = {
+            node_id for node_id, node in state.graph.nodes.items()
+            if not node.predecessor_node_ids
+        }
+        state.ready_nodes.update(root_nodes)
+
+        logger.info(f"Activated session {session_id} with {len(root_nodes)} root nodes")
+
+    def check_session_completed(self, session_id: str) -> bool:
+        """Check if a specific session has completed all its nodes.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if all nodes in the session have completed, False otherwise
+        """
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning(f"Attempted to check unknown session: {session_id}")
+            return False
+
+        # Check completion tracker for all nodes in this session
+        for node_id in state.graph.nodes.keys():
+            qualified_node_id = f"{session_id}:{node_id}"
+            if qualified_node_id in self._shared_node_completions:
+                # Record in local state if not already recorded
+                if node_id not in state.completed_nodes:
+                    completion_time = self._shared_node_completions[qualified_node_id]
+                    state.completed_nodes.add(node_id)
+                    state.node_completion_times[node_id] = completion_time
+
+        # Session is complete if all nodes are complete
+        is_complete = len(state.completed_nodes) == len(state.graph.nodes)
+
+        if is_complete and not state.is_complete:
+            state.is_complete = True
+            logger.info(f"Session {session_id} completed all {len(state.graph.nodes)} nodes")
+
+        return is_complete
+
         return False
     
     def load_lazy_data(self, data: LazyLoadInferenceAPIData) -> InferenceAPIData:
@@ -1043,49 +1083,22 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             # Pass completion callback for graph traversal
             completion_callback=self._on_node_completed,
         )
-    
+
     def get_data(self) -> Generator[InferenceAPIData, None, None]:
-        """Generate ALL events from active/pending sessions immediately.
-        
-        Yields all events upfront with their dependency information.
-        The worker handles dependency waiting via wait_for_predecessors_and_substitute().
-        This allows parallel execution of independent branches.
+        """OTel trace replay only works with TRACE_SESSION_REPLAY load type.
+
+        This method should never be called. If you see this error, check your config:
+        - data.type must be 'otel_trace_replay'
+        - load.type must be 'trace_session_replay'
+
+        The config validation should have caught this at startup.
         """
-        if self.api_config.type != APIType.Chat:
-            raise Exception(
-                f"Unsupported API type: {self.api_config.type}. "
-                "OTelTraceReplayDataGenerator only supports Chat API."
-            )
-        
-        if not self.all_events:
-            raise Exception("No events available for replay")
-        
-        logger.info(
-            f"get_data() starting: {len(self.active_session_ids)} active sessions, "
-            f"{len(self.pending_session_ids)} pending, {len(self.completed_session_ids)} completed"
+        raise NotImplementedError(
+            "OTel trace replay requires load.type='trace_session_replay'. "
+            "Cannot use with CONSTANT, POISSON, or CONCURRENT load types. "
+            "Use get_session_events() instead."
         )
-        
-        # Only yield events from active sessions (not pending)
-        # Pending sessions will be activated when current sessions complete
-        sessions_to_replay = list(self.active_session_ids)
-        
-        logger.info(
-            f"Yielding all events from {len(sessions_to_replay)} active session(s) "
-            f"({len(self.pending_session_ids)} pending)"
-        )
-        
-        # Yield all events from these sessions
-        # Events are already in self.all_events, filtered by session
-        for event in self.all_events:
-            # Extract session_id from qualified node_id (format: "session_id:node_id")
-            session_id = event.node_id.split(":", 1)[0]
-            
-            if session_id in sessions_to_replay:
-                logger.debug(f"Yielding event for {event.node_id}")
-                yield LazyLoadInferenceAPIData(data_index=self.all_events.index(event))
-        
-        logger.info(f"Finished yielding all events")
-    
+
     def _find_event_index(self, session_id: str, node_id: str) -> int:
         """Find the event index for a given session and node_id.
         
@@ -1118,49 +1131,3 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         # Record completion in shared dict (visible across all processes)
         self._shared_node_completions[qualified_node_id] = completion_time
         logger.info(f"Recorded completion for {qualified_node_id} in shared tracker")
-
-    def check_and_update_session_completions(self) -> int:
-        """Check shared completion tracker and update session states.
-
-        This should be called from the main process (load generator) to poll
-        for completed sessions and activate pending ones.
-
-        Returns:
-            Number of sessions that completed in this check
-        """
-        newly_completed = 0
-
-        for session_id in list(self.active_session_ids):
-            state = self.session_graph_state[session_id]
-
-            # Check which nodes in this session have completed
-            for node_id in state.graph.nodes.keys():
-                qualified_node_id = f"{session_id}:{node_id}"
-                if qualified_node_id in self._shared_node_completions:
-                    if node_id not in state.completed_nodes:
-                        # Newly completed node
-                        completion_time = self._shared_node_completions[qualified_node_id]
-                        state.completed_nodes.add(node_id)
-                        state.node_completion_times[node_id] = completion_time
-
-            # Check if session is now complete
-            if len(state.completed_nodes) == len(state.graph.nodes) and not state.is_complete:
-                logger.info(
-                    f"Session {session_id} completed all {len(state.graph.nodes)} nodes"
-                )
-                state.is_complete = True
-                self.completed_session_ids.add(session_id)
-                self.active_session_ids.discard(session_id)
-                newly_completed += 1
-
-                # Activate next pending session
-                if self.pending_session_ids:
-                    next_session_id = self.pending_session_ids.pop(0)
-                    logger.info(
-                        f"Activating next session: {next_session_id} "
-                        f"({len(self.pending_session_ids)} remaining in queue)"
-                    )
-                    self._activate_session(next_session_id)
-
-        return newly_completed
-

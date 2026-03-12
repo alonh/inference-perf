@@ -98,17 +98,7 @@ class OTelTraceReplayConfig(BaseModel):
     trace_directory: Optional[str] = Field(None, description="Directory containing OTel JSON trace files")
     trace_file: Optional[str] = Field(None, description="Path to a specific OTel JSON trace file")
 
-    # Concurrency and timing
-    concurrent_sessions: int = Field(
-        1,
-        ge=0,
-        description=(
-            "Maximum number of sessions active simultaneously. "
-            "0 = all sessions active at once. "
-            "N > 0 = at most N sessions active; when one completes, next is activated. "
-            "Sessions are processed to completion (no cycling)."
-        ),
-    )
+    # Timing (session concurrency moved to load.stages[].concurrent_sessions)
     session_start_delay_sec: float = Field(
         0.0, ge=0.0, description="[DEPRECATED] Not used with graph-based traversal"
     )
@@ -234,6 +224,9 @@ class ConcurrentLoadStage(LoadStage):
         return self
 
 
+logger = logging.getLogger(__name__)
+
+
 class TraceSessionReplayLoadStage(LoadStage):
     """Load stage for TRACE_SESSION_REPLAY load type.
 
@@ -241,40 +234,43 @@ class TraceSessionReplayLoadStage(LoadStage):
     instead of individual event rates. A session is one complete trace replay
     (all events in a trace file).
 
-    Two modes:
-    1. Rate-based: Start N sessions per second for a duration
-    2. Count-based: Replay N total sessions with max concurrency
+    Modes:
+    1. Simple concurrency control: Just set concurrent_sessions (optional rate/duration)
+    2. Rate-based with concurrency: Set concurrent_sessions + session_rate + duration
     """
 
-    # Rate-based mode
-    session_rate: Optional[float] = Field(None, gt=0, description="Sessions to start per second")
-    duration: Optional[int] = Field(None, gt=0, description="Duration in seconds (for rate-based mode)")
+    # Session concurrency control (REQUIRED)
+    concurrent_sessions: int = Field(
+        ...,  # Required field
+        ge=0,
+        description=(
+            "Maximum number of sessions active simultaneously. "
+            "0 = all sessions active at once (stress test mode). "
+            "N > 0 = at most N sessions active; when one completes, next is activated."
+        ),
+    )
 
-    # Count-based mode
-    num_sessions: Optional[int] = Field(None, gt=0, description="Total number of sessions to replay")
-    max_concurrent_sessions: Optional[int] = Field(None, gt=0, description="Max concurrent sessions (for count-based mode)")
+    # Optional rate limiting
+    session_rate: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Sessions to start per second (optional, omit for no rate limit)",
+    )
+    duration: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Duration in seconds (optional, omit to run until all sessions complete)",
+    )
 
     # These fields are not used for trace session replay
     rate: Optional[float] = Field(None, description="Not used for trace session replay")
     num_requests: Optional[int] = Field(None, description="Not used for trace session replay")
+    num_sessions: Optional[int] = Field(None, description="Not used for trace session replay")
     concurrency_level: Optional[int] = Field(None, description="Not used for trace session replay")
+    max_concurrent_sessions: Optional[int] = Field(None, description="Not used for trace session replay")
 
     @model_validator(mode="after")
     def validate_trace_session_fields(self) -> "TraceSessionReplayLoadStage":
-        # Must specify either rate-based or count-based mode
-        rate_mode = self.session_rate is not None and self.duration is not None
-        count_mode = self.num_sessions is not None
-
-        if not rate_mode and not count_mode:
-            raise ValueError(
-                "Must specify either (session_rate + duration) for rate-based mode or (num_sessions) for count-based mode"
-            )
-
-        if rate_mode and count_mode:
-            raise ValueError(
-                "Cannot specify both rate-based (session_rate + duration) and count-based (num_sessions) modes simultaneously"
-            )
-
         # Validate that unused fields are not set
         if self.rate is not None:
             raise ValueError("rate should not be set for TRACE_SESSION_REPLAY load type")
@@ -282,6 +278,28 @@ class TraceSessionReplayLoadStage(LoadStage):
             raise ValueError("num_requests should not be set for TRACE_SESSION_REPLAY load type")
         if self.concurrency_level is not None:
             raise ValueError("concurrency_level should not be set for TRACE_SESSION_REPLAY load type")
+        if self.num_sessions is not None:
+            raise ValueError("num_sessions should not be set for TRACE_SESSION_REPLAY load type")
+        if self.max_concurrent_sessions is not None:
+            raise ValueError(
+                "max_concurrent_sessions should not be set for TRACE_SESSION_REPLAY load type. "
+                "Use 'concurrent_sessions' instead."
+            )
+
+        # Validate session_rate vs concurrent_sessions
+        if self.session_rate is not None and self.concurrent_sessions > 0:
+            if self.session_rate > self.concurrent_sessions:
+                raise ValueError(
+                    f"session_rate ({self.session_rate}) cannot exceed "
+                    f"concurrent_sessions ({self.concurrent_sessions}). "
+                    f"You can't start sessions faster than the concurrency limit allows."
+                )
+
+        # Warn if session_rate has no effect
+        if self.concurrent_sessions == 0 and self.session_rate is not None:
+            logger.warning(
+                "session_rate has no practical effect when concurrent_sessions=0 (all sessions start immediately)"
+            )
 
         return self
 

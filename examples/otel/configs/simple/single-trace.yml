@@ -10,34 +10,29 @@ data:
   otel_trace_replay:
     # Directory containing OTel JSON trace files
     trace_directory: "examples/otel/test_traces/simple"
-    
-    # Concurrency settings - controlled by load config
-    concurrent_sessions: 1  # 0 = all sessions (controlled by load stages)
-    session_start_delay_sec: 0.0
-    time_scale: 1.0  # Real-time to avoid deadlocks with dependency waiting
-    
     # Model configuration - use static model
     use_static_model: true
     static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
-    
+
     # Request settings
     default_max_tokens: 100000
-    
+
     # Dependency inference settings
     dependency_window_ms: 120000
     max_dependencies_per_event: 3
-    
+
     # Error handling
     include_errors: true
     skip_invalid_files: true
     validate_dependencies: true
 
 load:
-  type: trace_session_replay  # Session-based replay
+  type: trace_session_replay
+
+  # Session concurrency control (moved from data config!)
   stages:
-    - session_rate: 1.0  # Start 1 session per second
-      duration: 10       # For 10 seconds
-      max_concurrent_sessions: 2  # Max 1 concurrent session
+    - concurrent_sessions: 1  # Sequential execution (one session at a time)
+
   num_workers: 3
   worker_max_concurrency: 10
 

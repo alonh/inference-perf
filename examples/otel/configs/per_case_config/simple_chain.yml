@@ -8,16 +8,12 @@ data:
   type: otel_trace_replay
   otel_trace_replay:
     trace_file: "examples/otel/test_traces/simple/simple_chain.json"
-    
-    concurrent_sessions: 1
-    session_start_delay_sec: 0.0
-    time_scale: 1.0
-    
+
     use_static_model: true
     static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
-    
+
     default_max_tokens: 100
-    
+
     dependency_window_ms: 120000
     max_dependencies_per_event: 3
     include_errors: false
@@ -27,8 +23,7 @@ data:
 load:
   type: trace_session_replay
   stages:
-    - num_sessions: 1
-      max_concurrent_sessions: 1
+    - concurrent_sessions: 1  # Sequential execution
   num_workers: 20
   worker_max_concurrency: 10
 

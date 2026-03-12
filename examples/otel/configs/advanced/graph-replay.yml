@@ -10,23 +10,18 @@ data:
   otel_trace_replay:
     # Directory containing replay graph JSON files
     trace_directory: "examples/otel/test_traces/advanced"
-    
-    # Concurrency settings - test with just 1 session for simplicity
-    concurrent_sessions: 1
-    session_start_delay_sec: 0.0
-    time_scale: 10.0  # Run 10x faster for quick testing
-    
+
     # Model configuration - use static model
     use_static_model: true
     static_model_name: "test-model"
-    
+
     # Request settings
     default_max_tokens: 100
-    
+
     # Dependency inference settings (not used for graph files, but kept for compatibility)
     dependency_window_ms: 120000
     max_dependencies_per_event: 3
-    
+
     # Error handling
     include_errors: true
     skip_invalid_files: true
@@ -35,9 +30,7 @@ data:
 load:
   type: trace_session_replay  # Session-based replay
   stages:
-    - session_rate: 1.0  # Start 1 session per second
-      duration: 10       # For 10 seconds
-      max_concurrent_sessions: 1  # Max 1 concurrent session
+    - concurrent_sessions: 1  # Sequential execution
   num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
   worker_max_concurrency: 10
 

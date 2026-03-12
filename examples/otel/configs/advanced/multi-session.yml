@@ -10,30 +10,25 @@ data:
   otel_trace_replay:
     # Directory containing OTel JSON trace files
     trace_directory: "examples/otel/test_traces/advanced"
-    
-    # Concurrency settings
-    concurrent_sessions: 2  # Run 2 sessions in parallel (0 = all sessions concurrently)
-    session_start_delay_sec: 5.0  # 5 second delay between session batches
-    time_scale: 1.0  # Real-time replay (0.5 = half speed, 2.0 = double speed)
-    
+
     # Model configuration - Option 1: Use static model for all requests
     use_static_model: true
     static_model_name: "meta-llama/Llama-3.1-8B-Instruct"
-    
+
     # Model configuration - Option 2: Use model mapping (comment out use_static_model above)
     # use_static_model: false
     # model_mapping:
     #   "gpt-4": "meta-llama/Llama-3.1-70B-Instruct"
     #   "gpt-3.5-turbo": "meta-llama/Llama-3.1-8B-Instruct"
     #   "claude-haiku-4-5-20251001": "meta-llama/Llama-3.1-8B-Instruct"
-    
+
     # Request settings
     default_max_tokens: 1000  # Default if not specified in trace
-    
+
     # Dependency inference settings
     dependency_window_ms: 120000  # 2 minute window for dependency inference
     max_dependencies_per_event: 3  # Max dependencies per request
-    
+
     # Error handling
     include_errors: true  # Include spans with error status
     skip_invalid_files: true  # Skip invalid trace files instead of failing
@@ -42,9 +37,7 @@ data:
 load:
   type: trace_session_replay  # Session-based replay
   stages:
-    - session_rate: 1.0  # Start 1 session per second
-      duration: 10       # For 10 seconds
-      max_concurrent_sessions: 1  # Max 1 concurrent session
+    - concurrent_sessions: 2  # Run 2 sessions in parallel
   num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
   worker_max_concurrency: 10
 

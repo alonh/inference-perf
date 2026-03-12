@@ -10,19 +10,14 @@ data:
   otel_trace_replay:
     # Use a single specific trace file instead of a directory
     trace_file: "examples/otel/test_traces/simple/simple_chain.json"
-    
-    # Single session, no concurrency
-    concurrent_sessions: 1
-    session_start_delay_sec: 0.0
-    time_scale: 1.0  # Real-time for easier debugging
-    
+
     # Model configuration
     use_static_model: true
     static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
-    
+
     # Request settings
     default_max_tokens: 50
-    
+
     # Dependency settings
     dependency_window_ms: 120000
     max_dependencies_per_event: 3
@@ -33,9 +28,7 @@ data:
 load:
   type: trace_session_replay  # Session-based replay
   stages:
-    - session_rate: 1.0  # Start 1 session per second
-      duration: 10       # For 10 seconds
-      max_concurrent_sessions: 1  # Max 1 concurrent session
+    - concurrent_sessions: 1  # Sequential execution
   num_workers: 1  # Single worker to avoid deadlocks with dependency blocking
   worker_max_concurrency: 10
 
