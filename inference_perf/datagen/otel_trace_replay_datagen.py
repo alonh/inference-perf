@@ -63,11 +63,6 @@ from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 logger = logging.getLogger(__name__)
 
-
-def _get_seg_message_id(node_id, msg_idx):
-    logger.debug(f"Node {node_id} msg_idx {msg_idx}")
-    return f"{node_id}:msg_{msg_idx}"
-
 # ---------------------------------------------------------------------------
 # SessionGraphState — tracks graph traversal state for one session
 # ---------------------------------------------------------------------------
@@ -125,17 +120,39 @@ class NodeOutputRegistry:
         if manager is not None:
             # Shared across processes via manager proxy
             self._store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
+            self._content_index: Dict[str, str] = manager.dict()  # type: ignore[assignment]
         else:
             # Single-process fallback (e.g., tests, num_workers=0)
             self._store = {}
+            self._content_index = {}
 
-    def record(self, node_id: str, output_text: str) -> None:
-        """Register the actual output text for a completed node."""
+    def record(self, node_id: str, output_text: str, recorded_content: Optional[str] = None) -> None:
+        """Register the actual output text for a completed node.
+        
+        Args:
+            node_id: The node ID
+            output_text: The actual generated output
+            recorded_content: The recorded/expected content from the trace (for content-based lookup)
+        """
         self._store[node_id] = output_text
+        # Also index by recorded content: map recorded_content directly to actual output
+        if recorded_content:
+            self._content_index[recorded_content] = output_text
 
     def get(self, node_id: str) -> Optional[str]:
         """Return the output text for node_id, or None if not yet registered."""
         return self._store.get(node_id)
+    
+    def get_by_content(self, recorded_content: str) -> Optional[str]:
+        """Return the actual output for a given recorded content.
+        
+        Args:
+            recorded_content: The recorded/expected content from the trace
+            
+        Returns:
+            The actual generated output, or None if not found
+        """
+        return self._content_index.get(recorded_content)
 
     def require(self, node_id: str, timeout_sec: float = 30.0) -> str:
         """Return the output text for node_id, waiting if not yet registered.
@@ -239,6 +256,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     wait_ms: int = 0
     input_segments: List[InputSegment] = field(default_factory=list)
     original_messages: List[Dict[str, Any]] = field(default_factory=list)
+    expected_output_content: Optional[str] = None
     
     # Completion callback for graph traversal
     completion_callback: Optional[Callable[[str, float], None]] = None
@@ -304,9 +322,10 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             if seg.type == "output":
                 # Output segment: substitute with actual output from the specific predecessor
                 if seg.source_node_id:
-                    message_id = _get_seg_message_id(seg.source_node_id, cursor)
-                    actual_output = self.registry.get(message_id)
-                    logger.info(f"Registry get output for output seg for {message_id}: {actual_output}")
+                    recorded_content = seg_msgs[0].get("content", "")
+                    actual_output = self.registry.get_by_content(recorded_content)
+                    logger.info(f"Registry get output for output seg for {seg.source_node_id} recorded: {recorded_content}")
+                    logger.info(f"Registry get output for output seg for {seg.source_node_id} real: {actual_output}")
                     if actual_output:
                         for msg in seg_msgs:
                             substituted = dict(msg)
@@ -330,14 +349,12 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                     result.extend(seg_msgs)
             elif seg.type in ("shared", "unique"):
                 # For shared/unique segments, check each message
-                assistant_message_idx = 0
-                for msg_idx, msg in enumerate(seg_msgs):
+                for msg in seg_msgs:
                     if msg.get("role") == "assistant":
-                        logger.debug(f"Node {self.node_id}: assistant msg_idx {msg_idx}, cursor {cursor} : predecessors {self.predecessor_node_ids}")
-                        message_id = _get_seg_message_id(self.predecessor_node_ids[assistant_message_idx], cursor + msg_idx)
-                        actual_output = self.registry.get(message_id)
-                        logger.info(f"Registry get output for assistant seg for {message_id}: {actual_output}")
-                        assistant_message_idx += 1
+                        # Look up by recorded content to find the actual output
+                        recorded_content = msg.get("content", "")
+                        actual_output = self.registry.get_by_content(recorded_content)
+                        
                         if actual_output:
                             # Found the actual output for this recorded content
                             new_msg = dict(msg)
@@ -456,9 +473,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         # Register the actual output in the shared registry so downstream calls
         # (those with "output" segments sourced from this node) can substitute it.
         # Always register something (even empty string) so dependent nodes don't wait forever.
+        # Also register with the expected/recorded content for content-based lookup.
         output_to_register = output_text or ""
-        self.registry.record(self.node_id, output_to_register)
-        self.registry.record(_get_seg_message_id(self.node_id, len(self.messages)), output_to_register)
+        logger.debug(f"calling registry record for node {self.node_id} recorded: {self.expected_output_content}")
+        logger.debug(f"calling registry record for node {self.node_id} real: {output_to_register}")
+        self.registry.record(self.node_id, output_to_register, self.expected_output_content)
 
         # Notify generator of completion for graph traversal
         if self.completion_callback:
@@ -494,6 +513,7 @@ class OTelTraceReplayEvent:
     t_end_ms: int     # node end time
     model: str
     messages: List[Dict[str, Any]]          # original (recorded) messages — used as template
+    expected_output: str
     input_segments: List[InputSegment]      # segment decomposition for output substitution
     expected_output_tokens: int
     temperature: Optional[float]
@@ -739,10 +759,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
                 qualified_predecessor_ids = [
                     f"{session.session_id}:{pid}" for pid in node.predecessor_node_ids
                 ]
-                print("XXX orig preds", node.node_id , ":::", qualified_predecessor_ids)
-
-                qualified_predecessor_ids = self._get_all_ancestors(node.node_id, session.graph.nodes, session.session_id)
-                print("XXX recursive preds", node.node_id , ":::", qualified_predecessor_ids)
 
                 # Rewrite source_node_id in input_segments
                 qualified_segments = [
@@ -762,6 +778,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
                     t_end_ms=0,    # Not used in graph traversal
                     model=gc.model,
                     messages=gc.messages,
+                    expected_output=gc.expected_output,
                     input_segments=qualified_segments,
                     expected_output_tokens=gc.expected_output_tokens,
                     temperature=gc.temperature,
@@ -1080,6 +1097,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             wait_ms=event.wait_ms,
             input_segments=event.input_segments,
             original_messages=event.messages,
+            expected_output_content=event.expected_output, #expected_output_content,
             # Pass completion callback for graph traversal
             completion_callback=self._on_node_completed,
         )

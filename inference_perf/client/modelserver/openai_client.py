@@ -170,6 +170,13 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
         request_data = json.dumps(payload)
 
+        # For debugging: TODO remove printouts when stable
+        print(f"XXX process_request:")
+        [print("\t", m) for m in data.messages]
+        print(f"XXX expected output text:")
+        print("\t",data.expected_output_content)
+        print("XXX =================")
+
         start = time.perf_counter()
         response: Optional[aiohttp.ClientResponse] = None
         response_info = None

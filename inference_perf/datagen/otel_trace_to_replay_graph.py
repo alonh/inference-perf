@@ -413,6 +413,7 @@ class GraphCall:
     call_id: str
     model: str
     messages: List[Dict[str, Any]]  # original messages (for replay)
+    expected_output: str # original output
     input_segments: List[InputSegment]
     total_input_tokens: int
     expected_output_tokens: int  # set max_tokens to this; disable EOS for downstream prefix
@@ -567,6 +568,7 @@ def build_graph(
             call_id=rc.call_id,
             model=rc.model,
             messages=rc.messages,
+            expected_output=(rc.output_text or ""),
             input_segments=segments,
             total_input_tokens=total_input_tokens,
             expected_output_tokens=expected_output_tokens,
@@ -622,6 +624,7 @@ def graph_call_to_dict(gc: GraphCall) -> Dict[str, Any]:
         "max_tokens_recorded": gc.max_tokens_recorded,
         "input_segments": [segment_to_dict(s) for s in gc.input_segments],
         "messages": gc.messages,
+        "expected_output": gc.expected_output,
     }
 
 
