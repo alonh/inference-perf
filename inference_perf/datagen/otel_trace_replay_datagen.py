@@ -479,7 +479,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         # Also register with the expected/recorded content for content-based lookup.
         output_to_register = output_text or ""
         logger.debug(f"calling registry record for node {self.node_id} recorded: {self.expected_output_content}")
-        logger.debug(f"calling registry record for node {self.node_id} real: {output_to_register}")
+        logger.debug(f"calling registry record for node {self.node_id} generated: {output_to_register}")
         self.registry.record(self.node_id, output_to_register, self.expected_output_content)
 
         # Notify generator of completion for graph traversal
