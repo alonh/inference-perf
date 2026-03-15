@@ -284,7 +284,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 None,
                 self.registry.wait_for_all,
                 self.predecessor_node_ids,
-                300.0  # 5 minute timeout
+                3600.0  # 1 hour timeout
             )
             logger.debug(f"Node {self.node_id} predecessors completed")
         
@@ -904,7 +904,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         event_indices = self.get_session_event_indices(session_index)
         return [LazyLoadInferenceAPIData(data_index=idx) for idx in event_indices]
 
-    def _activate_session_internal(self, session_id: str) -> None:
+    def activate_session(self, session_id: str) -> None:
         """Internal method to activate a session (mark nodes as ready).
 
         This is called by LoadGen when it decides to start a session.

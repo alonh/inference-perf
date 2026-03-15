@@ -405,7 +405,7 @@ class LoadGenerator:
             )
 
             # Activate session in DataGen (marks root nodes as ready)
-            self.datagen._activate_session_internal(session_id)
+            self.datagen.activate_session(session_id)
 
             # Get all events for this session
             events = self.datagen.get_session_events(session_idx)
