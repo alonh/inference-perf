@@ -324,8 +324,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 if seg.source_node_id:
                     recorded_content = seg_msgs[0].get("content", "")
                     actual_output = self.registry.get_by_content(recorded_content)
-                    logger.info(f"Registry get output for output seg for {seg.source_node_id} recorded: {recorded_content}")
-                    logger.info(f"Registry get output for output seg for {seg.source_node_id} real: {actual_output}")
+                    logger.debug(f"Registry get output for output seg for {self.node_id} from {seg.source_node_id} recorded: {recorded_content}")
+                    logger.debug(f"Registry get output for output seg for {self.node_id} from {seg.source_node_id} generated: {actual_output}")
+
                     if actual_output:
                         for msg in seg_msgs:
                             substituted = dict(msg)
@@ -354,7 +355,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                         # Look up by recorded content to find the actual output
                         recorded_content = msg.get("content", "")
                         actual_output = self.registry.get_by_content(recorded_content)
-                        
+                        logger.debug(f"Registry get shared assistant seg for {self.node_id} recorded: {recorded_content}")
+                        logger.debug(f"Registry get shared assistant seg for {self.node_id} generated: {actual_output}")
+
                         if actual_output:
                             # Found the actual output for this recorded content
                             new_msg = dict(msg)
