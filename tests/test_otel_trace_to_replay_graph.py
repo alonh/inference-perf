@@ -169,7 +169,7 @@ def test_sequential_chain() -> None:
     print("\nINPUT calls:")
     for c in calls:
         print(f"  {c.call_id}  t={c.t_start_ms}ms→{c.t_end_ms}ms  messages={len(c.messages)}")
-        print(f"    output: {(c.output_text or '')[:60]}...")
+        print(f"    output: {(c.out_message.text or '')[:60]}...")
     print("\nOUTPUT graph:")
     print_graph(graph)
     print("\nSummary:")
@@ -353,7 +353,8 @@ def test_parallel_fan_out() -> None:
         node_003 (FINAL) predecessor_node_ids=["node_001", "node_002"]  (causal: P1+P2 outputs)
 
     EXPECTED SEGMENTS for span_FINAL:
-        SHARED(2msg ← node_001 or node_002)  [sys + user are shared with P1/P2]
+        SHARED(1msg ← node_001 or node_002)  [sys]
+        UNIQUE(1msg)                         ["Combine these analyses into a unified summary."]
         OUTPUT(1msg ← node_001)              [assistant: OUTPUT_P1]
         OUTPUT(1msg ← node_002)              [assistant: OUTPUT_P2]
     """
@@ -367,7 +368,7 @@ def test_parallel_fan_out() -> None:
     print("\nINPUT calls:")
     for c in calls:
         print(f"  {c.call_id}  t={c.t_start_ms}ms→{c.t_end_ms}ms  messages={len(c.messages)}")
-        print(f"    output: {(c.output_text or '')[:60]}...")
+        print(f"    output: {(c.out_message.text or '')[:60]}...")
     print("\nOUTPUT graph:")
     print_graph(graph)
     print("\nSummary:")

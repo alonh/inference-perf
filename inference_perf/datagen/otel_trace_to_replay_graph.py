@@ -36,6 +36,7 @@ Falls back to len(text) // 4 (rough chars-per-token estimate) per message.
 """
 
 import argparse
+import ast
 import json
 import re
 from dataclasses import dataclass
@@ -43,6 +44,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from inference_perf.datagen.otel_trace_utils import reconstruct_llm_output, reconstruct_llm_input
+
+
+@dataclass
+class OtelMessage():
+    role: str
+    text: str
+
+
+class ComplexOtelMessage(OtelMessage): #usually, this message type can be user in the list of input messages.
+    def __init__(self, role:str , message_info: dict[str, Any], raw_reconstructed_text: str):
+        super().__init__(role=role, text=raw_reconstructed_text)
+        self.message_info=message_info
 
 # ---------------------------------------------------------------------------
 # Text helpers
@@ -69,8 +83,8 @@ def estimate_tokens(text: str) -> int:
 
 def message_content_text(msg: Dict[str, Any]) -> str:
     """Extract the text content of a message (handles string or list content)."""
-    content = msg.get("content", "")
-    if isinstance(content, list):
+    content = msg.text
+    if isinstance(content, list): #Todo Lena: Why is this part needed?
         parts = []
         for blk in content:
             if isinstance(blk, dict):
@@ -88,12 +102,12 @@ def message_tokens(msg: Dict[str, Any]) -> int:
 
 def messages_equal(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     """Return True if two messages have the same role and content."""
-    return a.get("role") == b.get("role") and norm_text(message_content_text(a)) == norm_text(message_content_text(b))
+    return a.role == b.role and norm_text(message_content_text(a)) == norm_text(message_content_text(b))
 
 
 def output_matches_message(output_text: str, msg: Dict[str, Any]) -> bool:
     """Return True if msg is an assistant message whose content matches output_text."""
-    if msg.get("role") != "assistant":
+    if msg.role != "assistant":
         return False
     msg_text = norm_text(message_content_text(msg))
     out_text = norm_text(output_text)
@@ -109,35 +123,47 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract messages from span attributes. Returns empty list if not found."""
     attrs = span.get("attributes") or {}
     raw = attrs.get("gen_ai.input.messages")
+    res = []
     if raw is None:
         return []
-    if isinstance(raw, list):
-        return raw
     if isinstance(raw, str):
         try:
-            result = json.loads(raw)
-            return result if isinstance(result, list) else []
+            raw = json.loads(raw)
         except Exception:
             raise ValueError(f"Failed to parse messages JSON: {raw}")
+
+    if isinstance(raw, list):
+        for x in raw:
+            # sometimes the content field contains a dictionary with several properties
+            role = x["role"]
+            content = x["content"]
+            if isinstance(content, str):
+                res.append(OtelMessage(role=role, text=content))
+            else:
+                res.append(ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
+        return res
+    else:
+        return []
     return []
 
 
-def extract_output_text(span: Dict[str, Any]) -> Optional[str]:
+def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
     """Extract output text from span attributes."""
     attrs = span.get("attributes") or {}
     for k in ("gen_ai.output.text", "gen_ai.completion", "gen_ai.output"):
         if k in attrs and isinstance(attrs[k], str):
-            return norm_text(attrs[k])
+            return OtelMessage(role="assistant", text=attrs[k])
     out = attrs.get("gen_ai.output.messages")
     if isinstance(out, str):
         try:
             msgs = json.loads(out)
-            if isinstance(msgs, list) and msgs:
-                return norm_text(message_content_text(msgs[-1]))
+            if len(msgs) > 1:
+                raise ValueError(f"Unexpected output messages fromat: expected a single message, got {len(msgs)} messages")
+            return ComplexOtelMessage(role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_input(msgs[0]))
         except Exception:
-            return norm_text(out)
+            raise ValueError(f"Failed parsing {out}")
     if isinstance(out, list) and out:
-        return norm_text(message_content_text(out[-1]))
+        return OtelMessage(role="assistant", text=message_content_text(out[-1]))
     return None
 
 
@@ -145,7 +171,7 @@ def is_llm_span(span: Dict[str, Any], include_errors: bool = False) -> bool:
     """Check if span represents an LLM call."""
     name = span.get("name", "") or ""
     attrs = span.get("attributes") or {}
-    is_llm = name.startswith("chat ") or "gen_ai.input.messages" in attrs or "gen_ai.request.model" in attrs
+    is_llm = name.startswith("chat ") or "gen_ai.input.messages" in attrs
     if not is_llm:
         return False
     if not include_errors:
@@ -169,17 +195,63 @@ class RawCall:
     t_start_ms: int  # ms relative to earliest span in file
     t_end_ms: int
     model: str
-    messages: List[Dict[str, Any]]  # original message list (required)
-    output_text: Optional[str]
+    messages: List[OtelMessage]  # original message list (required)
+    out_message: Optional[OtelMessage]
     prompt_tokens: Optional[int]  # from gen_ai.usage.prompt_tokens
     completion_tokens: Optional[int]  # from gen_ai.usage.completion_tokens
     temperature: Optional[float]
     max_tokens_recorded: Optional[int]
 
 
+def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter out duplicate spans based on start_time, end_time, and attributes.
+    (this is added to support exgentic traces)
+
+    Two spans are considered duplicates if they have identical:
+    - start_time
+    - end_time
+    - attributes (all key-value pairs)
+
+    When duplicates are found, only the first occurrence is kept.
+
+    Args:
+        spans: List of span dictionaries
+
+    Returns:
+        List of unique spans (duplicates removed)
+    """
+    seen_signatures: Set[str] = set()
+    unique_spans: List[Dict[str, Any]] = []
+
+    for span in spans:
+        # Create a signature for the span based on start_time, end_time, and attributes
+        start_time = span.get("start_time", "")
+        end_time = span.get("end_time", "")
+        attributes = span.get("attributes", {})
+
+        # Convert attributes dict to a sorted JSON string for consistent comparison
+        attrs_str = json.dumps(attributes, sort_keys=True, ensure_ascii=False)
+
+        # Create a unique signature
+        signature = f"{start_time}|{end_time}|{attrs_str}"
+
+        if signature not in seen_signatures:
+            seen_signatures.add(signature)
+            unique_spans.append(span)
+
+    return unique_spans
+
+
 def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -> List[RawCall]:
-    """Extract and sort raw LLM calls from spans."""
-    llm_spans = [s for s in spans if is_llm_span(s, include_errors=include_errors)]
+    """Extract and sort raw LLM calls from spans.
+
+    First filters out duplicate spans (identical start_time, end_time, and attributes),
+    then extracts LLM calls from the remaining unique spans.
+    """
+    # Filter out duplicate spans first
+    unique_spans = filter_duplicate_spans(spans)
+
+    llm_spans = [s for s in unique_spans if is_llm_span(s, include_errors=include_errors)]
     if not llm_spans:
         return []
 
@@ -190,17 +262,21 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
     for s in llm_spans:
         attrs = s.get("attributes") or {}
         messages = extract_messages(s)
-        out_text = extract_output_text(s)
+        out_message = extract_output_message(s)
         t_start = int(round((parse_iso(s["start_time"]) - t0) * 1000))
         t_end = int(round((parse_iso(s["end_time"]) - t0) * 1000)) if s.get("end_time") else t_start
 
         prompt_tokens = attrs.get("gen_ai.usage.prompt_tokens")
+        if prompt_tokens is None:
+            prompt_tokens = attrs.get('gen_ai.usage.input_tokens')
         completion_tokens = attrs.get("gen_ai.usage.completion_tokens")
+        if completion_tokens is None:
+            completion_tokens = attrs.get('gen_ai.usage.output_tokens')
         if prompt_tokens is not None:
             prompt_tokens = int(prompt_tokens)
+
         if completion_tokens is not None:
             completion_tokens = int(completion_tokens)
-
         calls.append(
             RawCall(
                 call_id=s.get("span_id") or "",
@@ -209,7 +285,7 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
                 t_end_ms=t_end,
                 model=str(attrs.get("gen_ai.request.model") or ""),
                 messages=messages,
-                output_text=out_text,
+                out_message=out_message,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 temperature=attrs.get("gen_ai.request.temperature"),
@@ -231,9 +307,9 @@ def is_causal_dep(a: RawCall, b: RawCall) -> bool:
     that matches A's output text (full content match, not a snippet).
     This means A's output was injected into B's prompt as a prior assistant turn.
     """
-    if not a.output_text or not b.messages:
+    if not a.out_message or not b.messages:
         return False
-    a_out = norm_text(a.output_text)
+    a_out = norm_text(a.out_message.text)
     for msg in b.messages:
         if output_matches_message(a_out, msg):
             return True
@@ -344,9 +420,9 @@ def decompose_input(
         best_out_msg_idx: int = total_msgs  # position in messages[]
 
         for pred_idx, pred in enumerate(predecessors):
-            if not pred.output_text:
+            if not pred.out_message:
                 continue
-            pred_out = norm_text(pred.output_text)
+            pred_out = norm_text(pred.out_message.text)
             # Search in remaining messages
             for msg_idx in range(cursor, total_msgs):
                 if output_matches_message(pred_out, messages[msg_idx]):
@@ -412,7 +488,7 @@ class GraphCall:
 
     call_id: str
     model: str
-    messages: List[Dict[str, Any]]  # original messages (for replay)
+    messages: List[OtelMessage]  # original messages (for replay)
     expected_output: str # original output
     input_segments: List[InputSegment]
     total_input_tokens: int
@@ -561,14 +637,14 @@ def build_graph(
 
         total_input_tokens = rc.prompt_tokens if rc.prompt_tokens is not None else sum(message_tokens(m) for m in rc.messages)
         expected_output_tokens = (
-            rc.completion_tokens if rc.completion_tokens is not None else estimate_tokens(rc.output_text or "")
+            rc.completion_tokens if rc.completion_tokens is not None else estimate_tokens(rc.out_message.text or "")
         )
 
         graph_call = GraphCall(
             call_id=rc.call_id,
             model=rc.model,
-            messages=rc.messages,
-            expected_output=(rc.output_text or ""),
+            messages=[{"role": x.role, "content": x.text} for x in rc.messages], #convert to a list of dictionaries representing a message with role and content only.
+            expected_output=(rc.out_message.text or ""),
             input_segments=segments,
             total_input_tokens=total_input_tokens,
             expected_output_tokens=expected_output_tokens,
@@ -660,12 +736,13 @@ def _fmt_ms(ms: int) -> str:
     return f"{ms / 1000:.1f}s"
 
 
-def _segment_label(seg: InputSegment) -> str:
+def _segment_label(seg: InputSegment, messages: List[Dict[str, str]]) -> str:
     """One-line label for an input segment."""
     type_labels = {"shared": "SHARED", "output": "OUTPUT", "unique": "UNIQUE"}
     label = type_labels.get(seg.type, seg.type.upper())
     src = f" <- {seg.source_node_id}" if seg.source_node_id else ""
-    return f"{label}({seg.message_count}msg/{seg.token_count}t{src})"
+    messages = "\n\t\t\t".join(f"{x['role']} : {x['content']}" for x in messages)
+    return f"{label}({seg.message_count}msg/{seg.token_count}t{src})\n\t\t\t{messages}"
 
 
 def _topo_order(graph: ReplayGraph) -> List[str]:
@@ -690,6 +767,16 @@ def _topo_order(graph: ReplayGraph) -> List[str]:
             queue.append(succ_id)
     return order
 
+def map_input_seq_to_messages(gc):
+    """
+    returns a list of tuples, each tuple contains the sequence, and the corresponding messages
+    """
+    curr_msg_index = 0
+    res = []
+    for seq in gc.input_segments:
+        res.append((seq,gc.messages[curr_msg_index: curr_msg_index + seq.message_count]))
+        curr_msg_index += seq.message_count
+    return res
 
 def print_graph(graph: ReplayGraph) -> None:
     """Pretty-print the replay graph to stdout with box-drawing characters."""
@@ -739,8 +826,10 @@ def print_graph(graph: ReplayGraph) -> None:
         temp_str = f"  temperature={gc.temperature}" if gc.temperature is not None else ""
         print(f"  ║   CALL {gc.call_id}   model={gc.model}{temp_str}")
         print(f"  ║     Input  ({gc.total_input_tokens} tokens, {len(gc.messages)} messages):")
-        for seg in gc.input_segments:
-            print(f"  ║       * {_segment_label(seg)}")
+        for seg, messages in map_input_seq_to_messages(gc):
+            offset = "       "
+            segment_label = _segment_label(seg, messages).replace('\n', f'\n{offset}')
+            print(f"  ║{offset}* {segment_label}")
         out_note = f"   (max_tokens_recorded={gc.max_tokens_recorded})" if gc.max_tokens_recorded else ""
         print(f"  ║     Output: {gc.expected_output_tokens} tokens expected{out_note}")
 
@@ -755,7 +844,7 @@ def summarize_graph(graph: ReplayGraph) -> str:
         node = graph.nodes[nid]
         gc = node.call
         preds = f"after [{', '.join(node.predecessor_node_ids)}] +{node.wait_ms}ms" if node.predecessor_node_ids else "ROOT"
-        seg_str = " ".join(_segment_label(s) for s in gc.input_segments)
+        seg_str = " ".join(_segment_label(s, m) for s, m in map_input_seq_to_messages(gc))
         lines.append(f"[{nid}] {preds}  t={node.t_start_ms}-{node.t_end_ms}ms")
         lines.append(f"    {gc.call_id}: [{seg_str}] -> O({gc.expected_output_tokens}t)")
     return "\n".join(lines)
