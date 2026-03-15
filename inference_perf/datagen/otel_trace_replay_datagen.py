@@ -705,25 +705,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             graph=graph,
         )
 
-    def _get_all_ancestors(self, node_id: str, graph_nodes: Dict[str, GraphNode], session_id: str) -> List[str]:
-        """Recursively get all ancestor node IDs from a node to the root."""
-        ancestors = []
-        visited = set()
-
-        def traverse(nid: str):
-            if nid in visited:
-                return
-            visited.add(nid)
-
-            node = graph_nodes.get(nid)
-            if node:
-                for pred_id in node.predecessor_node_ids:
-                    traverse(pred_id)
-                    ancestors.append(f"{session_id}:{pred_id}")
-
-        traverse(node_id)
-        return ancestors
-
     def _build_replay_schedule(self) -> None:
         """Build the replay schedule using graph traversal (no time-based sorting).
         
@@ -824,67 +805,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             if self.otel_config.model_mapping:
                 return self.otel_config.model_mapping.get(recorded_model, recorded_model)
             return recorded_model
-    
-    def _build_messages_with_substitution(
-        self,
-        event: OTelTraceReplayEvent,
-    ) -> List[Dict[str, Any]]:
-        """Build the message list for a call, substituting "output" segments with
-        actual outputs from the NodeOutputRegistry.
-
-        Algorithm:
-        - Walk through input_segments in order, tracking a cursor over event.messages.
-        - For "shared" and "unique" segments: copy messages as-is (cursor advances by message_count).
-        - For "output" segments: replace the assistant message content with the actual
-          output from the registry (keyed by segment.source_node_id).
-
-        Raises:
-            KeyError: if a required predecessor output is not yet in the registry.
-                      This indicates a dependency ordering violation.
-                      Alternative (not implemented): fall back to the recorded static text
-                      by catching KeyError and using event.messages[cursor]["content"] instead.
-        """
-        if not event.input_segments:
-            # No segment info — use messages as-is (no substitution possible)
-            return list(event.messages)
-
-        result: List[Dict[str, Any]] = []
-        cursor = 0
-
-        for seg in event.input_segments:
-            seg_msgs = event.messages[cursor: cursor + seg.message_count]
-
-            if seg.type in ("shared", "unique"):
-                # Keep messages verbatim
-                result.extend(seg_msgs)
-
-            elif seg.type == "output":
-                # Substitute with actual output from the registry
-                assert seg.source_node_id is not None, (
-                    f"Output segment for call {event.call_id} has no source_node_id"
-                )
-                actual_output = self.output_registry.require(seg.source_node_id)
-
-                # Replace each message in this segment (always 1 for "output" segments)
-                for msg in seg_msgs:
-                    substituted = dict(msg)
-                    substituted["content"] = actual_output
-                    result.append(substituted)
-
-            else:
-                # Unknown segment type — pass through unchanged
-                logger.warning(
-                    f"Unknown segment type '{seg.type}' for call {event.call_id}, passing through"
-                )
-                result.extend(seg_msgs)
-
-            cursor += seg.message_count
-
-        # Append any remaining messages not covered by segments (safety net)
-        if cursor < len(event.messages):
-            result.extend(event.messages[cursor:])
-
-        return result
 
     def get_request_count(self) -> int:
         """Return total number of requests to replay from active sessions only.
