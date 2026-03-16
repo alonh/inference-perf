@@ -120,39 +120,60 @@ class NodeOutputRegistry:
         if manager is not None:
             # Shared across processes via manager proxy
             self._store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
-            self._content_index: Dict[str, str] = manager.dict()  # type: ignore[assignment]
+            self._messages_store: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
+            self._output_store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
         else:
             # Single-process fallback (e.g., tests, num_workers=0)
             self._store = {}
-            self._content_index = {}
+            self._messages_store = {}
+            self._output_store = {}
 
-    def record(self, node_id: str, output_text: str, recorded_content: Optional[str] = None) -> None:
+    def record(self, node_id: str, output_text: str, messages=None) -> None:
         """Register the actual output text for a completed node.
         
         Args:
             node_id: The node ID
             output_text: The actual generated output
-            recorded_content: The recorded/expected content from the trace (for content-based lookup)
+            messages: The input messages
         """
         self._store[node_id] = output_text
-        # Also index by recorded content: map recorded_content directly to actual output
-        if recorded_content:
-            self._content_index[recorded_content] = output_text
+        if messages:
+            self._messages_store[node_id] = list(messages)  # Convert to list for storage
+            self._output_store[node_id] = output_text
 
     def get(self, node_id: str) -> Optional[str]:
         """Return the output text for node_id, or None if not yet registered."""
         return self._store.get(node_id)
     
-    def get_by_content(self, recorded_content: str) -> Optional[str]:
-        """Return the actual output for a given recorded content.
+    def get_output_by_node_id(self, node_id: str) -> Optional[str]:
+        """Return the output text for a given node_id from the output store.
         
         Args:
-            recorded_content: The recorded/expected content from the trace
+            node_id: The node ID to look up
             
         Returns:
-            The actual generated output, or None if not found
+            The output text, or None if not found
         """
-        return self._content_index.get(recorded_content)
+        return self._output_store.get(node_id)
+    
+    def get_messages_by_node_id(self, node_id: str) -> Optional[List[Any]]:
+        """Return the input messages for a given node_id.
+        
+        Args:
+            node_id: The node ID to look up
+            
+        Returns:
+            List of input messages, or None if not found
+        """
+        return self._messages_store.get(node_id)
+    
+    def get_node_ids(self) -> List[str]:
+        """Return all registered node IDs.
+        
+        Returns:
+            List of all node IDs that have registered outputs
+        """
+        return list(self._store.keys())
 
     def require(self, node_id: str, timeout_sec: float = 30.0) -> str:
         """Return the output text for node_id, waiting if not yet registered.
@@ -294,9 +315,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             logger.debug(f"Node {self.node_id} waiting {wait_sec:.3f}s (wait_ms={self.wait_ms})")
             await asyncio.sleep(wait_sec)
         
-        # Substitute output segments with actual predecessor outputs
-        if any(seg.type == "output" for seg in self.input_segments):
-            logger.debug(f"Node {self.node_id} substituting output segments")
+        # Substitute output segments with actual predecessor outputs and also the shared segments after substitution
+        if any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments):
+            logger.debug(f"Node {self.node_id} substituting output/shared segments")
             substituted = self._build_messages_with_substitution()
             # Update messages with substituted content
             self.messages = [
@@ -322,10 +343,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             if seg.type == "output":
                 # Output segment: substitute with actual output from the specific predecessor
                 if seg.source_node_id:
-                    recorded_content = seg_msgs[0].get("content", "")
-                    actual_output = self.registry.get_by_content(recorded_content)
-                    logger.debug(f"Registry get output for output seg for {self.node_id} from {seg.source_node_id} recorded: {recorded_content}")
-                    logger.debug(f"Registry get output for output seg for {self.node_id} from {seg.source_node_id} generated: {actual_output}")
+                    actual_output = self.registry.get_output_by_node_id(seg.source_node_id)
+                    logger.debug(
+                        f"Registry get for node {self.node_id} output segment from {seg.source_node_id} generated: {actual_output}")
 
                     if actual_output:
                         for msg in seg_msgs:
@@ -348,35 +368,17 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                         f"using recorded content"
                     )
                     result.extend(seg_msgs)
-            elif seg.type in ("shared", "unique"):
-                # For shared/unique segments, check each message
-                for msg in seg_msgs:
-                    if msg.get("role") == "assistant":
-                        # Look up by recorded content to find the actual output
-                        recorded_content = msg.get("content", "")
-                        actual_output = self.registry.get_by_content(recorded_content)
-                        logger.debug(f"Registry get shared assistant seg for {self.node_id} recorded: {recorded_content}")
-                        logger.debug(f"Registry get shared assistant seg for {self.node_id} generated: {actual_output}")
-
-                        if actual_output:
-                            # Found the actual output for this recorded content
-                            new_msg = dict(msg)
-                            new_msg["content"] = actual_output
-                            result.append(new_msg)
-                            logger.debug(
-                                f"Node {self.node_id}: substituted assistant message "
-                                f"in {seg.type} segment by content lookup"
-                            )
-                        else:
-                            # No match found, keep original
-                            result.append(msg)
-                            logger.debug(
-                                f"Node {self.node_id}: no content match for assistant message "
-                                f"in {seg.type} segment, keeping original"
-                            )
-                    else:
-                        # Non-assistant message, keep as-is
-                        result.append(msg)
+            elif seg.type == "shared":
+                seg_msgs_from_parent = self.registry.get_messages_by_node_id(seg.source_node_id)
+                logger.debug(f"Registry get for node {self.node_id} from {seg.source_node_id} shared segment from {seg.source_node_id} num messages in parent node: {len(seg_msgs_from_parent)}")
+                if len(seg_msgs_from_parent) != len(seg_msgs):
+                    logger.error(f"***************** node {self.node_id} shared segment from {seg.source_node_id} had different number of messages in parent node: {len(seg_msgs_from_parent)}, num messages in seg: {len(seg_msgs)}")
+                for msg_idx, msg in enumerate(seg_msgs_from_parent):
+                    result.append(dict(msg))
+            elif seg.type == "unique":
+                # Unique message, keep as-is
+                for msg_idx, msg in enumerate(seg_msgs):
+                    result.append(msg)
             else:
                 # Unknown segment type, keep as-is
                 result.extend(seg_msgs)
@@ -473,14 +475,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 output_text=output_text or None,
             )
 
-        # Register the actual output in the shared registry so downstream calls
-        # (those with "output" segments sourced from this node) can substitute it.
+        # Register output and input messages (with substitutions) in the shared registry for downstream lookups.
         # Always register something (even empty string) so dependent nodes don't wait forever.
-        # Also register with the expected/recorded content for content-based lookup.
         output_to_register = output_text or ""
-        logger.debug(f"calling registry record for node {self.node_id} recorded: {self.expected_output_content}")
-        logger.debug(f"calling registry record for node {self.node_id} generated: {output_to_register}")
-        self.registry.record(self.node_id, output_to_register, self.expected_output_content)
+        self.registry.record(self.node_id, output_to_register, self.messages)
+        logger.debug(f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output generated: {output_to_register}")
 
         # Notify generator of completion for graph traversal
         if self.completion_callback:
