@@ -230,13 +230,14 @@ logger = logging.getLogger(__name__)
 class TraceSessionReplayLoadStage(LoadStage):
     """Load stage for TRACE_SESSION_REPLAY load type.
 
-    For OTel trace replay, this allows configuring session-level load patterns
-    instead of individual event rates. A session is one complete trace replay
-    (all events in a trace file).
+    A stage runs exactly ``num_sessions`` sessions (a slice of the corpus) at
+    ``concurrent_sessions`` concurrency.  A session cursor on ``LoadGenerator``
+    advances across stages so each stage draws the next N sessions — mirroring
+    how ``get_data()`` advances through data across Standard/Concurrent stages.
 
     Modes:
-    1. Simple concurrency control: Just set concurrent_sessions (optional rate/duration)
-    2. Rate-based with concurrency: Set concurrent_sessions + session_rate + duration
+    1. Simple concurrency control: set concurrent_sessions (and optionally num_sessions)
+    2. Rate-based with concurrency: set concurrent_sessions + session_rate (+ num_sessions)
     """
 
     # Session concurrency control (REQUIRED)
@@ -256,36 +257,28 @@ class TraceSessionReplayLoadStage(LoadStage):
         gt=0,
         description="Sessions to start per second (optional, omit for no rate limit)",
     )
-    duration: Optional[float] = Field(
+    num_sessions: Optional[int] = Field(
         None,
         gt=0,
-        description="Duration in seconds (optional, omit to run until all sessions complete)",
+        description=(
+            "Number of sessions to run in this stage. "
+            "Draws the next N sessions from the corpus. "
+            "None = all remaining sessions."
+        ),
+    )
+    timeout: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Wall-clock safety limit in seconds. If exceeded, in-flight sessions are "
+            "cancelled and stage exits as FAILED. Optional."
+        ),
     )
 
-    # These fields are not used for trace session replay
-    rate: Optional[float] = Field(None, description="Not used for trace session replay")
-    num_requests: Optional[int] = Field(None, description="Not used for trace session replay")
-    num_sessions: Optional[int] = Field(None, description="Not used for trace session replay")
-    concurrency_level: Optional[int] = Field(None, description="Not used for trace session replay")
-    max_concurrent_sessions: Optional[int] = Field(None, description="Not used for trace session replay")
+    model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="after")
     def validate_trace_session_fields(self) -> "TraceSessionReplayLoadStage":
-        # Validate that unused fields are not set
-        if self.rate is not None:
-            raise ValueError("rate should not be set for TRACE_SESSION_REPLAY load type")
-        if self.num_requests is not None:
-            raise ValueError("num_requests should not be set for TRACE_SESSION_REPLAY load type")
-        if self.concurrency_level is not None:
-            raise ValueError("concurrency_level should not be set for TRACE_SESSION_REPLAY load type")
-        if self.num_sessions is not None:
-            raise ValueError("num_sessions should not be set for TRACE_SESSION_REPLAY load type")
-        if self.max_concurrent_sessions is not None:
-            raise ValueError(
-                "max_concurrent_sessions should not be set for TRACE_SESSION_REPLAY load type. "
-                "Use 'concurrent_sessions' instead."
-            )
-
         # Validate session_rate vs concurrent_sessions
         if self.session_rate is not None and self.concurrent_sessions > 0:
             if self.session_rate > self.concurrent_sessions:
@@ -294,12 +287,6 @@ class TraceSessionReplayLoadStage(LoadStage):
                     f"concurrent_sessions ({self.concurrent_sessions}). "
                     f"You can't start sessions faster than the concurrency limit allows."
                 )
-
-        # Warn if session_rate has no effect
-        if self.concurrent_sessions == 0 and self.session_rate is not None:
-            logger.warning(
-                "session_rate has no practical effect when concurrent_sessions=0 (all sessions start immediately)"
-            )
 
         return self
 

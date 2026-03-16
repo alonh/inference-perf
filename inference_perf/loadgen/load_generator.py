@@ -258,6 +258,7 @@ class LoadGenerator:
             self.lora_adapters = [config.name for config in load_config.lora_traffic_split]
             self.lora_weights = [config.split for config in load_config.lora_traffic_split]
         self.base_seed: int = load_config.base_seed
+        self._session_cursor: int = 0
 
     def _sigint_handler(self, _signum: int, _frame: Optional[FrameType]) -> None:
         """SIGINT handler that sets interrup_sig flag to True"""
@@ -340,17 +341,34 @@ class LoadGenerator:
         # Session pool management
         concurrent_sessions = stage.concurrent_sessions
         session_rate = stage.session_rate
-        duration = stage.duration
+        timeout = stage.timeout
+
+        # Compute this stage's session slice from the cursor
+        available_sessions = total_sessions - self._session_cursor
+        if available_sessions <= 0:
+            logger.warning(f"Stage {stage_id}: no sessions remaining in corpus, skipping")
+            return
+        effective_num_sessions = (
+            min(stage.num_sessions, available_sessions)
+            if stage.num_sessions is not None
+            else available_sessions
+        )
+
+        stage_start_cursor = self._session_cursor
+        self._session_cursor += effective_num_sessions
 
         logger.info(
             f"Session pool: concurrent_sessions={concurrent_sessions}, "
-            f"session_rate={session_rate}, duration={duration}, "
+            f"session_rate={session_rate}, timeout={timeout}, "
+            f"num_sessions={effective_num_sessions} (corpus offset {stage_start_cursor}), "
             f"total_sessions={total_sessions}"
         )
 
         # Track active sessions
         active_session_indices: Set[int] = set()  # Session indices currently active
-        pending_session_indices: List[int] = list(range(total_sessions))  # Sessions waiting to start
+        pending_session_indices: List[int] = list(
+            range(stage_start_cursor, stage_start_cursor + effective_num_sessions)
+        )  # Sessions waiting to start
         completed_session_ids: Set[str] = set()  # Session IDs that have completed
 
         # Track dispatch timing
@@ -358,13 +376,14 @@ class LoadGenerator:
         last_dispatch_time = start_time
         next_dispatch_time = start_time
 
-        # Calculate total expected requests
+        # Calculate total expected requests for this stage's slice only
         total_expected_requests = sum(
-            len(self.datagen.get_session_event_indices(i)) for i in range(total_sessions)
+            len(self.datagen.get_session_event_indices(i))
+            for i in range(stage_start_cursor, stage_start_cursor + effective_num_sessions)
         )
 
         logger.info(
-            f"Total of {total_expected_requests} requests across {total_sessions} sessions"
+            f"Total of {total_expected_requests} requests across {effective_num_sessions} sessions"
         )
 
         def should_start_next_session() -> bool:
@@ -376,12 +395,6 @@ class LoadGenerator:
             # Check if there are pending sessions
             if not pending_session_indices:
                 return False
-
-            # Check duration limit
-            if duration is not None:
-                elapsed = time.perf_counter() - start_time
-                if elapsed >= duration:
-                    return False
 
             # Check rate limit
             if session_rate is not None:
@@ -437,7 +450,7 @@ class LoadGenerator:
             return dispatched_count
 
         # Main dispatch and wait loop
-        with tqdm(total=1.0, desc=f"Stage {stage_id} session progress") as pbar:
+        with tqdm(total=1.0, desc=f"Stage {stage_id} progress ({effective_num_sessions} sessions)") as pbar:
             while True:
                 # Check for interrupts
                 if self.interrupt_sig:
@@ -448,6 +461,12 @@ class LoadGenerator:
 
                 if cb := next((cb for cb in self.circuit_breakers if cb.is_open()), None):
                     logger.warning(f'Loadgen detects circuit breakers "{cb.name}" open, exit the stage.')
+                    stage_status = StageStatus.FAILED
+                    break
+
+                if timeout is not None and time.perf_counter() - start_time >= timeout:
+                    pbar.close()
+                    logger.warning(f"Stage {stage_id}: timeout after {timeout:.1f}s")
                     stage_status = StageStatus.FAILED
                     break
 
@@ -464,7 +483,7 @@ class LoadGenerator:
                             newly_completed.append(session_idx)
                             logger.info(
                                 f"Session {session_idx} ({session_id}) completed "
-                                f"({len(completed_session_ids)}/{total_sessions} total)"
+                                f"({len(completed_session_ids)}/{effective_num_sessions} total)"
                             )
 
                 # Remove completed sessions from active pool
@@ -477,11 +496,11 @@ class LoadGenerator:
                     dispatch_session(session_idx)
 
                 # Check if we're done
-                if len(completed_session_ids) >= total_sessions:
-                    logger.info(f"All {total_sessions} sessions completed")
+                if len(completed_session_ids) >= effective_num_sessions:
+                    logger.info(f"All {effective_num_sessions} sessions completed")
                     break
 
-                # Check if we should stop (duration limit, no more sessions to start)
+                # Check if we should stop (no more sessions to start or wait for)
                 if not pending_session_indices and not active_session_indices:
                     logger.info("No more sessions to dispatch or wait for")
                     break
@@ -496,6 +515,15 @@ class LoadGenerator:
         # Mark stage as completed if we finished normally
         if stage_status == StageStatus.RUNNING:
             stage_status = StageStatus.COMPLETED
+
+        # Drain in-flight requests on timeout (mirrors run_stage cleanup)
+        if stage_status == StageStatus.FAILED and cancel_signal is not None:
+            cancel_signal.set()
+            await sleep(1)
+            while active_requests_counter.value > 0:
+                await sleep(1)
+            request_queue.drain()
+            cancel_signal.clear()
 
         # Clear the request_phase event to force worker gather
         request_phase.clear()
@@ -755,6 +783,24 @@ class LoadGenerator:
                 logger.error(f"Preprocessing exception: {e}")
                 stop_signal.set()
                 return
+
+        if self.load_type == LoadType.TRACE_SESSION_REPLAY:
+            from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
+            if isinstance(self.datagen, OTelTraceReplayDataGenerator):
+                total_sessions = self.datagen.get_session_count()
+                total_requested = sum(
+                    s.num_sessions for s in self.stages
+                    if isinstance(s, TraceSessionReplayLoadStage) and s.num_sessions is not None
+                )
+                has_open_ended = any(
+                    isinstance(s, TraceSessionReplayLoadStage) and s.num_sessions is None
+                    for s in self.stages
+                )
+                if not has_open_ended and total_requested > total_sessions:
+                    raise ValueError(
+                        f"Stages request {total_requested} sessions total but corpus only has "
+                        f"{total_sessions}. Reduce num_sessions across stages or add more trace files."
+                    )
 
         for stage_id, stage in enumerate(self.stages):
             # Handle session-based trace replay
