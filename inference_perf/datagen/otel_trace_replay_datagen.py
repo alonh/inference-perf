@@ -388,20 +388,12 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         return result
 
     
-    def register_mock_completion(self, output_text: str = "") -> None:
-        """Register a completion for mock/test scenarios.
-        
-        This should be called after a mock request completes to unblock
-        dependent nodes that are waiting for this node's output.
-        
-        Args:
-            output_text: The output text to register (empty string for mock)
-        """
-        logger.info(f"register_mock_completion called for node {self.node_id}")
-        self.registry.record(self.node_id, output_text)
-        logger.info(f"Registered mock completion for node {self.node_id}")
-        
-        # Call completion callback to activate successor nodes
+    def on_completion(self, info: InferenceInfo) -> None:
+        """Called after every request completes (real or mock) to register output and unblock successors."""
+        output_text = info.output_text if isinstance(info, OTelInferenceInfo) else ""
+        output_text = output_text or ""
+        self.registry.record(self.node_id, output_text, self.messages)
+        logger.debug(f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output: {output_text}")
         if self.completion_callback:
             logger.info(f"Calling completion callback for node {self.node_id}")
             self.completion_callback(self.node_id, time.perf_counter())
@@ -475,21 +467,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 output_text=output_text or None,
             )
 
-        # Register output and input messages (with substitutions) in the shared registry for downstream lookups.
-        # Always register something (even empty string) so dependent nodes don't wait forever.
-        output_to_register = output_text or ""
-        self.registry.record(self.node_id, output_to_register, self.messages)
-        logger.debug(f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output generated: {output_to_register}")
+        # Register output and notify successors.
+        self.on_completion(info)
 
-        # Notify generator of completion for graph traversal
-        if self.completion_callback:
-            logger.info(f"Calling completion callback for node {self.node_id} from process_response")
-            completion_time = time.perf_counter()
-            self.completion_callback(self.node_id, completion_time)
-            logger.info(f"Completion callback finished for node {self.node_id}")
-        else:
-            logger.warning(f"No completion callback set for node {self.node_id} in process_response")
-        
         if output_text:
             logger.debug(
                 f"Registered output for node {self.node_id}: {len(output_text)} chars : {output_text}"

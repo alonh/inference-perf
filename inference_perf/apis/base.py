@@ -71,6 +71,10 @@ class InferenceAPIData(BaseModel):
     ) -> InferenceInfo:
         raise NotImplementedError
 
+    def on_completion(self, info: InferenceInfo) -> None:
+        """Called after every request completes (real or mock). Override to add post-completion side effects."""
+        pass
+
     async def process_failure(
         self,
         response: Optional[ClientResponse],

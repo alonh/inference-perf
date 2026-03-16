@@ -50,20 +50,18 @@ class MockModelServerClient(ModelServerClient):
             else:
                 if self.mock_latency > 0:
                     await asyncio.sleep(self.mock_latency)
-                
-                # For OTel trace replay, register mock completion
-                if hasattr(data, 'register_mock_completion'):
-                    data.register_mock_completion("Mock output")
-                
+
+                info = InferenceInfo(
+                    input_tokens=0,
+                    output_tokens=0,
+                    lora_adapter=lora_adapter,
+                )
+                data.on_completion(info)
                 self.metrics_collector.record_metric(
                     RequestLifecycleMetric(
                         stage_id=stage_id,
                         request_data=str(await data.to_payload(effective_model_name, 3, False, False)),
-                        info=InferenceInfo(
-                            input_tokens=0,
-                            output_tokens=0,
-                            lora_adapter=lora_adapter,
-                        ),
+                        info=info,
                         error=None,
                         start_time=start,
                         end_time=time.perf_counter(),
