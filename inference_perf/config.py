@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import Enum
 from os import cpu_count
 import time
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, Dict
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, HttpUrl, model_validator
