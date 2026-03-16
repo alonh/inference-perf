@@ -13,7 +13,7 @@ data:
 
     # Model configuration - use static model
     use_static_model: true
-    static_model_name: "test-model"
+    static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
 
     # Request settings
     default_max_tokens: 100
@@ -35,9 +35,9 @@ load:
   worker_max_concurrency: 10
 
 server:
-  type: mock  # Use mock server for testing
+  type: vllm  # Use mock server for testing
   base_url: "http://localhost:8000"
-  model_name: "test-model"
+  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 storage:
   local_storage:
