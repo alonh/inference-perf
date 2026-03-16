@@ -637,14 +637,14 @@ def build_graph(
 
         total_input_tokens = rc.prompt_tokens if rc.prompt_tokens is not None else sum(message_tokens(m) for m in rc.messages)
         expected_output_tokens = (
-            rc.completion_tokens if rc.completion_tokens is not None else estimate_tokens(rc.out_message.text or "")
+            rc.completion_tokens if rc.completion_tokens is not None else estimate_tokens(rc.out_message.text or "" if rc.out_message else "")
         )
 
         graph_call = GraphCall(
             call_id=rc.call_id,
             model=rc.model,
             messages=[{"role": x.role, "content": x.text} for x in rc.messages], #convert to a list of dictionaries representing a message with role and content only.
-            expected_output=(rc.out_message.text or ""),
+            expected_output=(rc.out_message.text or "" if rc.out_message else ""),
             input_segments=segments,
             total_input_tokens=total_input_tokens,
             expected_output_tokens=expected_output_tokens,
