@@ -323,7 +323,7 @@ def main_cli() -> None:
         elif config.data.type == DataGenType.BillsumConversations:
             datagen = BillsumConversationsDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.OTelTraceReplay:
-            datagen = OTelTraceReplayDataGenerator(config.api, config.data, tokenizer, mp_manager)
+            datagen = OTelTraceReplayDataGenerator(config.api, config.data, tokenizer, mp_manager, config.load.base_seed)
         else:
             datagen = MockDataGenerator(config.api, config.data, tokenizer)
     else:

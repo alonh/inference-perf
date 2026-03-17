@@ -39,6 +39,7 @@ the base `ChatCompletionAPIData.process_response` to register the output after e
 import json
 import logging
 import multiprocessing as mp
+import random
 import time
 from dataclasses import dataclass, field, replace as dc_replace
 from multiprocessing.managers import SyncManager
@@ -527,6 +528,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         config: DataConfig,
         tokenizer: Optional[CustomTokenizer],
         mp_manager: Optional[SyncManager] = None,
+        base_seed: Optional[int] = None,
     ) -> None:
         super().__init__(api_config, config, tokenizer)
 
@@ -535,6 +537,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
 
         self.otel_config = config.otel_trace_replay
         self.mp_manager = mp_manager
+        self.base_seed = base_seed if base_seed is not None else 42
         
         # Determine if we're loading from a directory or a single file
         if self.otel_config.trace_directory:
@@ -641,6 +644,11 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
                     logger.error(f"Failed to process trace file {trace_file}: {e}")
                     if not self.otel_config.skip_invalid_files:
                         raise
+        
+        # Randomize session order using base_seed for reproducibility
+        random.seed(self.base_seed)
+        random.shuffle(self.sessions)
+        logger.info(f"Randomized session order using seed: {self.base_seed}")
     
     def _process_trace_file(self, trace_file: Path, file_index: int) -> Optional[OTelTraceSession]:
         """Process a single OTel JSON trace file into a ReplayGraph session."""
