@@ -121,16 +121,14 @@ class NodeOutputRegistry:
             # Shared across processes via manager proxy
             self._store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
             self._messages_store: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
-            self._output_store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
         else:
             # Single-process fallback (e.g., tests, num_workers=0)
             self._store = {}
             self._messages_store = {}
-            self._output_store = {}
 
     def record(self, node_id: str, output_text: str, messages=None) -> None:
         """Register the actual output text for a completed node.
-        
+
         Args:
             node_id: The node ID
             output_text: The actual generated output
@@ -139,22 +137,14 @@ class NodeOutputRegistry:
         self._store[node_id] = output_text
         if messages:
             self._messages_store[node_id] = list(messages)  # Convert to list for storage
-            self._output_store[node_id] = output_text
 
     def get(self, node_id: str) -> Optional[str]:
         """Return the output text for node_id, or None if not yet registered."""
         return self._store.get(node_id)
-    
+
     def get_output_by_node_id(self, node_id: str) -> Optional[str]:
-        """Return the output text for a given node_id from the output store.
-        
-        Args:
-            node_id: The node ID to look up
-            
-        Returns:
-            The output text, or None if not found
-        """
-        return self._output_store.get(node_id)
+        """Return the output text for a given node_id."""
+        return self._store.get(node_id)
     
     def get_messages_by_node_id(self, node_id: str) -> Optional[List[Any]]:
         """Return the input messages for a given node_id.
