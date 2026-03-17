@@ -1,0 +1,55 @@
+# Config for software_architecture_review.json - Complex multi-agent architecture review workflow
+
+api:
+  type: chat
+  streaming: false
+
+data:
+  type: otel_trace_replay
+  otel_trace_replay:
+    trace_file: "examples/otel/test_traces/advanced/software_architecture_review.json"
+    # Complex multi-agent workflow with 15 spans testing deep dependency chains:
+    # Phase 1: Lead architect dispatches 4 parallel specialists (Scalability, Security, Data, Cost)
+    # Phase 2: Lead synthesizes 4 parallel analyses (4-way fan-in, identifies conflicts)
+    # Phase 3: 3 specialists refine based on conflicts (parallel refinement)
+    # Phase 4: Lead synthesizes refinements (3-way fan-in)
+    # Phase 5: User asks about HA/DR, 2 new specialists analyze (parallel)
+    # Phase 6: Lead synthesizes HA/DR (2-way fan-in)
+    # Phase 7: Final executive summary (depends on entire conversation history)
+    # Tests: Multiple fan-in patterns, iterative refinement, deep dependency chains (7+ levels)
+    # Critical: Span 6, 10, 14, 15 test multi-level output substitution with complex dependencies
+
+    use_static_model: true
+    static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+    default_max_tokens: 150
+
+    dependency_window_ms: 120000
+    max_dependencies_per_event: 10
+    include_errors: false
+    skip_invalid_files: true
+    validate_dependencies: true
+
+load:
+  type: trace_session_replay
+  stages:
+    - concurrent_sessions: 1  # Sequential execution
+  num_workers: 20
+  worker_max_concurrency: 10
+
+server:
+  type: vllm
+  base_url: "http://localhost:8000"
+  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+storage:
+  local_storage:
+    path: "reports-software-architecture-review"
+
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: false
+    per_request: false
+
+# Made with Bob
