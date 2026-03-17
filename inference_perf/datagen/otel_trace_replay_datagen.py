@@ -198,8 +198,8 @@ class NodeOutputRegistry:
 
             elapsed = time.time() - start_time
             
-            # Log every 1 minute while waiting
-            if elapsed - (last_log_time - start_time) >= 60.0:
+            # Log every 2 minute while waiting
+            if elapsed - (last_log_time - start_time) >= 120.0:
                 logger.warning(
                     f"Still waiting for output from node '{node_id}' ({elapsed:.1f}s elapsed)"
                 )
