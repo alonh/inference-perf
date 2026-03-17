@@ -193,13 +193,13 @@ class NodeOutputRegistry:
             if output is not None:
                 elapsed = time.time() - start_time
                 if elapsed > 0.1:  # Log if we had to wait
-                    logger.info(f"Got output for node {node_id} after {elapsed:.2f}s wait")
+                    logger.debug(f"Got output for node {node_id} after {elapsed:.2f}s wait")
                 return output
 
             elapsed = time.time() - start_time
             
-            # Log every 5 seconds while waiting
-            if elapsed - (last_log_time - start_time) >= 5.0:
+            # Log every 1 minute while waiting
+            if elapsed - (last_log_time - start_time) >= 60.0:
                 logger.warning(
                     f"Still waiting for output from node '{node_id}' ({elapsed:.1f}s elapsed)"
                 )
@@ -386,9 +386,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         self.registry.record(self.node_id, output_text, self.messages)
         logger.debug(f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output: {output_text}")
         if self.completion_callback:
-            logger.info(f"Calling completion callback for node {self.node_id}")
+            logger.debug(f"Calling completion callback for node {self.node_id}")
             self.completion_callback(self.node_id, time.perf_counter())
-            logger.info(f"Completion callback finished for node {self.node_id}")
+            logger.debug(f"Completion callback finished for node {self.node_id}")
         else:
             logger.warning(f"No completion callback set for node {self.node_id}")
 
@@ -401,7 +401,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         lora_adapter: Optional[str] = None,
     ) -> OTelInferenceInfo:
         """Process the LLM response, capture output text, and register it."""
-        logger.info(f"process_response called for node {self.node_id}")
+        logger.debug(f"process_response called for node {self.node_id}")
         output_text: str = ""
 
         if config.streaming:
@@ -596,7 +596,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         # Build flat list of all events across all sessions for replay
         self._build_replay_schedule()
 
-        logger.info(
+        logger.debug(
             f"Loaded {len(self.sessions)} sessions with {len(self.all_events)} total events "
             f"from {self.trace_dir}"
         )
@@ -605,7 +605,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         """Load and process OTel JSON files from either a directory or a single file."""
         if self.single_file_mode:
             # Single file mode: load only the specified file
-            logger.info(f"Loading single trace file: {self.trace_file}")
+            logger.debug(f"Loading single trace file: {self.trace_file}")
             try:
                 session = self._process_trace_file(self.trace_file, 0)
                 if session:
@@ -1044,8 +1044,8 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         completion tracker (_shared_node_completions). The main process will
         check this tracker and manage session activation/completion.
         """
-        logger.info(f"_on_node_completed called for {qualified_node_id}")
+        logger.debug(f"_on_node_completed called for {qualified_node_id}")
 
         # Record completion in shared dict (visible across all processes)
         self._shared_node_completions[qualified_node_id] = completion_time
-        logger.info(f"Recorded completion for {qualified_node_id} in shared tracker")
+        logger.debug(f"Recorded completion for {qualified_node_id} in shared tracker")

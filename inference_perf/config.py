@@ -121,8 +121,7 @@ class OTelTraceReplayConfig(BaseModel):
 
     # Dependency inference
     dependency_window_ms: int = Field(120_000, gt=0, description="Time window for dependency inference (ms)")
-    max_dependencies_per_event: int = Field(3, gt=0, description="Maximum dependencies per event")
-
+    
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(True, description="Skip invalid trace files instead of failing")

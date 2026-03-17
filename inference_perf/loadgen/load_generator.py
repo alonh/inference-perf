@@ -194,7 +194,7 @@ class Worker(mp.Process):
                 task = create_task(
                     schedule_client(self.request_queue, request_data, request_time, stage_id, semaphore, lora_adapter)
                 )
-                logging.info(f"creating inference task with request data {request_data}", extra={"request_data": request_data})
+                logging.debug(f"creating inference task with request data {request_data}", extra={"request_data": request_data})
                 tasks.append(task)
                 await sleep(0)
 
