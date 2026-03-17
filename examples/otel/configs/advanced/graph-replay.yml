@@ -20,7 +20,6 @@ data:
 
     # Dependency inference settings (not used for graph files, but kept for compatibility)
     dependency_window_ms: 120000
-    max_dependencies_per_event: 3
 
     # Error handling
     include_errors: true

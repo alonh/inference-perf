@@ -20,7 +20,6 @@ data:
 
     # Dependency settings
     dependency_window_ms: 120000
-    max_dependencies_per_event: 3
     include_errors: false
     skip_invalid_files: true
     validate_dependencies: true
