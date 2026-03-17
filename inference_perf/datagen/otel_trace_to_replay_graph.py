@@ -136,11 +136,26 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
         for x in raw:
             # sometimes the content field contains a dictionary with several properties
             role = x["role"]
-            content = x["content"]
-            if isinstance(content, str):
-                res.append(OtelMessage(role=role, text=content))
+            if "content" in x:
+                content = x["content"]
+                if isinstance(content, str):
+                    res.append(OtelMessage(role=role, text=content))
+                else:
+                    res.append(ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
             else:
-                res.append(ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
+                """ This is the case here:
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\": \"NYC\"}"}
+                        }]
+                }
+
+                """
+                res.append(
+                    ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
         return res
     else:
         return []

@@ -262,6 +262,13 @@ def reconstruct_llm_input(input_message: Union[str, Dict]) -> str:
         # Check for parts field (OTEL format)
         if 'parts' in input_message:
             return _extract_content_from_parts(input_message['parts'])
+        
+        # Check for tool_calls field (assistant messages with only tool calls)
+        if 'tool_calls' in input_message:
+            tool_calls = _extract_tool_calls(input_message)
+            if tool_calls:
+                return "\n".join(_format_tool_call(tc) for tc in tool_calls)
+        
         return ""
     elif isinstance(content, str):
         return content
