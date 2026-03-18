@@ -564,8 +564,8 @@ def build_graph(
         return ReplayGraph(nodes={}, root_node_ids=[], source_file=source_file)
 
     n = len(calls)
-    # Assign node IDs 1:1 with calls
-    node_ids = [f"node_{i:03d}" for i in range(n)]
+    # Assign node IDs 1:1 with calls, incorporating span_id for traceability
+    node_ids = [f"node_{i:03d}_{calls[i].call_id}" for i in range(n)]
 
     # ---------------------------------------------------------------------------
     # Step 1: Find direct predecessors for each call

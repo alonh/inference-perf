@@ -676,7 +676,7 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         # Use trace_id from first call as session_id, but make it unique by adding file_index
         # to handle cases where multiple files have the same trace_id
         base_session_id = raw_calls[0].trace_id or f"session_{file_index}"
-        session_id = f"{base_session_id}_file{file_index}"
+        session_id = f"file{file_index}_{base_session_id}"
 
         return OTelTraceSession(
             session_id=session_id,

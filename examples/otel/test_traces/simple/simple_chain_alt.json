@@ -1,18 +1,18 @@
 {
-  "trace_id": "paris_conversation_COPY2_chain_001",
+  "trace_id": "paris_conversation_chain_COPY",
   "span_count": 3,
   "collected_at": "2026-02-25T10:00:00.000000",
   "spans": [
     {
-      "trace_id": "paris_conversation_COPY2_chain_001",
-      "span_id": "capital_question_001",
+      "trace_id": "paris_conversation_chain",
+      "span_id": "capital_question",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",
       "start_time": "2026-02-25T10:00:00.000000",
       "end_time": "2026-02-25T10:00:02.500000",
       "attributes": {
-        "exgentic.session.id": "session_001",
+        "exgentic.session.id": "session",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4",
@@ -30,15 +30,15 @@
       }
     },
     {
-      "trace_id": "paris_conversation_COPY2_chain_001",
-      "span_id": "landmarks_question_002",
+      "trace_id": "paris_conversation_chain",
+      "span_id": "landmarks_question",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",
       "start_time": "2026-02-25T10:00:03.000000",
       "end_time": "2026-02-25T10:00:05.000000",
       "attributes": {
-        "exgentic.session.id": "session_001",
+        "exgentic.session.id": "session",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4",
@@ -56,15 +56,15 @@
       }
     },
     {
-      "trace_id": "paris_conversation_COPY2_chain_001",
-      "span_id": "eiffel_tower_height_003",
+      "trace_id": "paris_conversation_chain",
+      "span_id": "eiffel_tower_height",
       "parent_span_id": null,
       "name": "chat gpt-4",
       "kind": "SPAN_KIND_INTERNAL",
       "start_time": "2026-02-25T10:00:06.000000",
       "end_time": "2026-02-25T10:00:08.000000",
       "attributes": {
-        "exgentic.session.id": "session_001",
+        "exgentic.session.id": "session",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4",
