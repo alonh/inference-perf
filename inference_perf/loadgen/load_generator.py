@@ -177,7 +177,21 @@ class Worker(mp.Process):
                         with self.active_requests_counter.get_lock():
                             self.active_requests_counter.value += 1
                             inflight = True
-                        await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
+                        
+                        error = await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
+                        
+                        # Check if this was an OTel request and if it failed (HTTP error)
+                        if error is not None and hasattr(request_data, "process_failure"):
+                            exception = Exception(
+                                f"{error.error_type}: {error.error_msg}"
+                            )
+                            await request_data.process_failure(
+                                response=None,
+                                config=self.client.api_config,
+                                tokenizer=self.client.tokenizer,
+                                exception=exception,
+                                lora_adapter=lora_adapter,
+                            )
                     except CancelledError:
                         pass
                     finally:

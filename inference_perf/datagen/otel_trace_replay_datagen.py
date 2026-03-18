@@ -470,6 +470,58 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
         return info
 
+    async def process_failure(
+        self,
+        response: Optional[ClientResponse],
+        config: APIConfig,
+        tokenizer: CustomTokenizer,
+        exception: Exception,
+        lora_adapter: Optional[str] = None,
+    ) -> InferenceInfo:
+        """Process a failed request and signal failure to main process.
+
+        This method is called when:
+        1. An exception occurs (network error, timeout, etc.)
+        2. An HTTP error occurs (status != 200)
+
+        It signals the failure to the main process via shared state,
+        then calls on_completion() to unblock dependent nodes.
+
+        Args:
+            response: The HTTP response (may be None for network errors)
+            config: API configuration
+            tokenizer: Tokenizer for token counting
+            exception: The exception that occurred
+            lora_adapter: Optional LoRA adapter name
+
+        Returns:
+            OTelInferenceInfo with empty output
+        """
+        logger.error(
+            f"Request failed for node {self.node_id}: {type(exception).__name__}: {str(exception)}"
+        )
+
+        # Extract session_id from node_id (format: "session_id:node_xxx")
+        # Mark the entire session as failed so other nodes in this session will skip processing
+        session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
+
+        # Create empty inference info
+        empty_info = OTelInferenceInfo(
+            input_tokens=0,
+            output_tokens=0,
+            lora_adapter=lora_adapter,
+            output_text="",  # Empty output for failed requests
+        )
+
+        # Call on_completion to register empty output and unblock dependents
+        self.on_completion(empty_info)
+
+        logger.info(
+            f"Called on_completion() for failed node {self.node_id} to unblock dependent nodes"
+        )
+
+        return empty_info
+
 
 # ---------------------------------------------------------------------------
 # OTelTraceReplayEvent — one event per graph node

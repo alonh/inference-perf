@@ -106,7 +106,7 @@ class openAIModelServerClient(ModelServerClient):
             if self._session is None:
                 self._session = openAIModelServerClientSession(self)
             session = self._session
-        await session.process_request(data, stage_id, scheduled_time, lora_adapter)
+        return await session.process_request(data, stage_id, scheduled_time, lora_adapter)
 
     async def close(self) -> None:
         """Close the internal session created by process_request, if any."""
@@ -151,7 +151,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
     async def process_request(
         self, data: InferenceAPIData, stage_id: int, scheduled_time: float, lora_adapter: Optional[str] = None
-    ) -> None:
+    ) -> Optional[ErrorResponseInfo]:
         # Compute effective model name: use LoRA adapter if provided, otherwise use client's model name
         effective_model_name = lora_adapter if lora_adapter else self.client.model_name
         payload = await data.to_payload(
@@ -264,6 +264,9 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
         # Record the metric
         self.client.metrics_collector.record_metric(metric)
+        
+        # Return error if any (for load_generator to handle)
+        return error
 
     async def close(self) -> None:
         await self.session.close()
