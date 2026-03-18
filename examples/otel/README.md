@@ -135,13 +135,17 @@ or "substitute this message with the live output from a prior request".
 Instead, `OTelTraceReplayDataGenerator` works at the granularity of whole *sessions* (one
 trace file = one session). It exposes a session-oriented API that replaces `get_data()`:
 
+**Six methods used instead of `get_data()`:**
+
 | `get_data()` equivalent | OTel session API |
 |---|---|
-| iterate to get next request | `get_session_count()` / `get_session_info(idx)` — enumerate the corpus |
-| (implicit, iterator is ready immediately) | `activate_session(session_id)` — marks root nodes as ready and arms the `NodeOutputRegistry` |
-| `next(generator)` → one `InferenceAPIData` | `get_session_events(idx)` → all `LazyLoadInferenceAPIData` items for the session at once |
-| (caller assumes request is ready) | each item blocks in `wait_for_predecessors_and_substitute()` until predecessors have written their outputs |
-| (caller counts finished requests) | `check_session_completed(session_id)` — returns `True` when every node in the graph has finished |
+| iterate to get next request | 1. `get_session_count()` — returns total number of sessions available<br>2. `get_session_info(idx)` — returns metadata for a specific session |
+| (implicit, iterator is ready immediately) | 3. `activate_session(session_id)` — marks root nodes as ready and arms the `NodeOutputRegistry` |
+| `next(generator)` → one `InferenceAPIData` | 4. `get_session_events(idx)` — returns all `LazyLoadInferenceAPIData` items for the session at once |
+| (caller assumes request is ready) | 5. `get_session_event_indices(idx)` — returns event indices for a session (helper for `get_session_events`) |
+| (caller counts finished requests) | 6. `check_session_completed(session_id)` — returns `True` when every node in the graph has finished |
+
+Note: Each `LazyLoadInferenceAPIData` item blocks in `wait_for_predecessors_and_substitute()` until predecessors have written their outputs.
 
 This design means all requests for a session are enqueued immediately (so the worker pool can
 handle parallelism within the graph), but each request only *executes* once its predecessors
