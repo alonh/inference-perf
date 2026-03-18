@@ -486,9 +486,14 @@ class LoadGenerator:
                                 f"({len(completed_session_ids)}/{effective_num_sessions} total)"
                             )
 
-                # Remove completed sessions from active pool
+                # Remove completed sessions from active pool and clean up memory
                 for session_idx in newly_completed:
                     active_session_indices.discard(session_idx)
+                    
+                    # Clean up completed session data to prevent memory leaks
+                    session_info = self.datagen.get_session_info(session_idx)
+                    session_id = session_info["session_id"]
+                    self.datagen.cleanup_session(session_id)
 
                 # Try to start new sessions to fill the pool
                 while should_start_next_session():

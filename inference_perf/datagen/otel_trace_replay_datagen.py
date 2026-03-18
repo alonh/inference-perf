@@ -1048,4 +1048,40 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
 
         # Record completion in shared dict (visible across all processes)
         self._shared_node_completions[qualified_node_id] = completion_time
+
+    def cleanup_session(self, session_id: str) -> None:
+        """Clean up memory for a completed session.
+        
+        Removes all node outputs, messages, and completion tracking data
+        for the specified session to prevent memory leaks in long-running
+        benchmarks with many sessions.
+        
+        Args:
+            session_id: The session ID to clean up
+        """
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning(f"Attempted to cleanup unknown session: {session_id}")
+            return
+        
+        # Count nodes for logging
+        node_count = len(state.graph.nodes)
+        
+        # Remove node outputs and messages from registry
+        for node_id in state.graph.nodes.keys():
+            qualified_node_id = f"{session_id}:{node_id}"
+            
+            # Remove from output registry
+            self.output_registry._store.pop(qualified_node_id, None)
+            self.output_registry._messages_store.pop(qualified_node_id, None)
+            
+            # Remove from shared completion tracker. we might use this to track the completion of the session when generating reports, do not pop yet
+            # self._shared_node_completions.pop(qualified_node_id, None)
+        
+        # Remove session state
+        del self.session_graph_state[session_id]
+        
+        logger.debug(
+            f"Cleaned up session {session_id}: removed {node_count} nodes from memory"
+        )
         logger.debug(f"Recorded completion for {qualified_node_id} in shared tracker")
