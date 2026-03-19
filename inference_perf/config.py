@@ -96,7 +96,7 @@ class OTelTraceReplayConfig(BaseModel):
     """Configuration for OTel trace replay data generator."""
 
     trace_directory: Optional[str] = Field(None, description="Directory containing OTel JSON trace files")
-    trace_file: Optional[str] = Field(None, description="Path to a specific OTel JSON trace file")
+    trace_files: Optional[List[str]] = Field(None, description="List of paths to specific OTel JSON trace files")
 
     # Timing (session concurrency moved to load.stages[].concurrent_sessions)
     session_start_delay_sec: float = Field(
@@ -129,11 +129,16 @@ class OTelTraceReplayConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_static_model(self) -> "OTelTraceReplayConfig":
-        # Validate that exactly one of trace_directory or trace_file is provided
-        if not self.trace_directory and not self.trace_file:
-            raise ValueError("Either trace_directory or trace_file must be provided")
-        if self.trace_directory and self.trace_file:
-            raise ValueError("Cannot specify both trace_directory and trace_file; choose one")
+        # Validate that exactly one of trace_directory or trace_files is provided
+        sources_provided = sum([
+            self.trace_directory is not None,
+            self.trace_files is not None,
+        ])
+        
+        if sources_provided == 0:
+            raise ValueError("Either trace_directory or trace_files must be provided")
+        if sources_provided > 1:
+            raise ValueError("Cannot specify both trace_directory and trace_files; choose one")
 
         # Validate static model configuration
         if self.use_static_model and not self.static_model_name:

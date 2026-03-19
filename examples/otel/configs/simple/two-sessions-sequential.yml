@@ -8,8 +8,10 @@ api:
 data:
   type: otel_trace_replay
   otel_trace_replay:
-    # Directory containing OTel JSON trace files
-    trace_directory: "examples/otel/test_traces/simple"
+    # List of specific OTel JSON trace files
+    trace_files:
+      - "examples/otel/test_traces/simple/simple_chain.json"
+      - "examples/otel/test_traces/simple/simple_chain_alt.json"
     # Model configuration - use static model
     use_static_model: true
     static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"

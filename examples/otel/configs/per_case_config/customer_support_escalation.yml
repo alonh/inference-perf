@@ -7,7 +7,8 @@ api:
 data:
   type: otel_trace_replay
   otel_trace_replay:
-    trace_file: "examples/otel/test_traces/advanced/customer_support_escalation.json"
+    trace_files:
+      - "examples/otel/test_traces/advanced/customer_support_escalation.json"
     # Multi-agent customer support workflow with 9 spans testing output substitution:
     # Phase 1: Coordinator dispatches parallel agents (Technical Specialist + Network Analyst)
     # Phase 2: Coordinator synthesizes parallel results (fan-in pattern, tests multi-agent substitution)

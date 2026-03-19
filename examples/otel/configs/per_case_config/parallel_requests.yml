@@ -7,7 +7,8 @@ api:
 data:
   type: otel_trace_replay
   otel_trace_replay:
-    trace_file: "examples/otel/test_traces/advanced/parallel_requests.json"
+    trace_files:
+      - "examples/otel/test_traces/advanced/parallel_requests.json"
 
     use_static_model: true
     static_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"

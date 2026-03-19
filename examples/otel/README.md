@@ -62,8 +62,11 @@ data:
   type: otel_trace_replay
   otel_trace_replay:
     # Source — specify one:
-    trace_file: "path/to/single_trace.json"       # single trace
-    trace_directory: "path/to/traces/"            # all .json files in dir
+    trace_files:                                  # list of specific trace files
+      - "path/to/trace1.json"
+      - "path/to/trace2.json"
+      - "path/to/trace3.json"
+    trace_directory: "path/to/traces/"            # OR: all .json files in dir
 
     # Model
     use_static_model: true                        # override recorded model names
