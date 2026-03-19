@@ -120,12 +120,12 @@ class NodeOutputRegistry:
     def __init__(self, manager: Optional[SyncManager] = None) -> None:
         if manager is not None:
             # Shared across processes via manager proxy
-            self._store: Dict[str, str] = manager.dict()  # type: ignore[assignment]
-            self._messages_store: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
+            self._node_output_text: Dict[str, str] = manager.dict()  # type: ignore[assignment]
+            self._node_input_messages: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
         else:
             # Single-process fallback (e.g., tests, num_workers=0)
-            self._store = {}
-            self._messages_store = {}
+            self._node_output_text = {}
+            self._node_input_messages = {}
 
     def record(self, node_id: str, output_text: str, messages=None) -> None:
         """Register the actual output text for a completed node.
@@ -135,17 +135,17 @@ class NodeOutputRegistry:
             output_text: The actual generated output
             messages: The input messages
         """
-        self._store[node_id] = output_text
+        self._node_output_text[node_id] = output_text
         if messages:
-            self._messages_store[node_id] = list(messages)  # Convert to list for storage
+            self._node_input_messages[node_id] = list(messages)  # Convert to list for storage
 
     def get(self, node_id: str) -> Optional[str]:
         """Return the output text for node_id, or None if not yet registered."""
-        return self._store.get(node_id)
+        return self._node_output_text.get(node_id)
 
     def get_output_by_node_id(self, node_id: str) -> Optional[str]:
         """Return the output text for a given node_id."""
-        return self._store.get(node_id)
+        return self._node_output_text.get(node_id)
     
     def get_messages_by_node_id(self, node_id: str) -> Optional[List[Any]]:
         """Return the input messages for a given node_id.
@@ -156,7 +156,7 @@ class NodeOutputRegistry:
         Returns:
             List of input messages, or None if not found
         """
-        return self._messages_store.get(node_id)
+        return self._node_input_messages.get(node_id)
     
     def get_node_ids(self) -> List[str]:
         """Return all registered node IDs.
@@ -164,7 +164,7 @@ class NodeOutputRegistry:
         Returns:
             List of all node IDs that have registered outputs
         """
-        return list(self._store.keys())
+        return list(self._node_output_text.keys())
 
     def require(self, node_id: str, timeout_sec: float = 30.0) -> str:
         """Return the output text for node_id, waiting if not yet registered.
@@ -189,7 +189,7 @@ class NodeOutputRegistry:
         last_log_time = start_time
 
         while True:
-            output = self._store.get(node_id)
+            output = self._node_output_text.get(node_id)
             if output is not None:
                 elapsed = time.time() - start_time
                 if elapsed > 0.1:  # Log if we had to wait
@@ -1072,8 +1072,8 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             qualified_node_id = f"{session_id}:{node_id}"
             
             # Remove from output registry
-            self.output_registry._store.pop(qualified_node_id, None)
-            self.output_registry._messages_store.pop(qualified_node_id, None)
+            self.output_registry._node_output_text.pop(qualified_node_id, None)
+            self.output_registry._node_input_messages.pop(qualified_node_id, None)
             
             # Remove from shared completion tracker. we might use this to track the completion of the session when generating reports, do not pop yet
             # self._shared_node_completions.pop(qualified_node_id, None)
