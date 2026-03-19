@@ -332,6 +332,9 @@ def main_cli() -> None:
         config.load.interval = max(config.load.interval, metrics_client.scrape_interval)
     loadgen = LoadGenerator(datagen, config.load)
 
+    # Wire datagen into reportgen for session-level reporting
+    reportgen.datagen = datagen
+
     # Setup Perf Test Runner
     perfrunner = InferencePerfRunner(model_server_client, loadgen, reportgen, storage_clients)
 

@@ -90,7 +90,11 @@ class LazyLoadDataMixin(ABC):
     def get_request(data_generator: DataGenerator, data: InferenceAPIData) -> InferenceAPIData:
         if isinstance(data, LazyLoadInferenceAPIData):
             if isinstance(data_generator, LazyLoadDataMixin):
-                return data_generator.load_lazy_data(data)
+                result = data_generator.load_lazy_data(data)
+                # Propagate session_id from the lazy wrapper to the materialized object
+                if data.session_id is not None and hasattr(result, "session_id"):
+                    result.session_id = data.session_id
+                return result
             else:
                 raise NotImplementedError("Data Generator doesn't support lazy loading of requested InferenceAPIData")
         else:

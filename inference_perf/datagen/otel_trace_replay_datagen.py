@@ -48,7 +48,7 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Set
 
 from aiohttp import ClientResponse
 
-from inference_perf.apis import ChatCompletionAPIData, InferenceAPIData, InferenceInfo, LazyLoadInferenceAPIData
+from inference_perf.apis import ChatCompletionAPIData, InferenceAPIData, InferenceInfo, LazyLoadInferenceAPIData, SessionLifecycleMetric, ErrorResponseInfo
 from inference_perf.apis.chat import ChatMessage
 from inference_perf.config import APIConfig, APIType, DataConfig
 from inference_perf.datagen.base import DataGenerator, LazyLoadDataMixin
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SessionGraphState:
     """Tracks graph traversal state for one session.
-    
+
     Manages which nodes are ready to dispatch, which have been dispatched,
     and which have completed. Used for graph-based traversal.
     """
@@ -577,6 +577,9 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         else:
             self._shared_node_completions = {}
 
+        # Accumulated session-level metrics (populated by LoadGen at session completion)
+        self._session_metrics: List[SessionLifecycleMetric] = []
+
         # Load and process all OTel trace files
         self.sessions: List[OTelTraceSession] = []
         self._load_trace_files()
@@ -881,6 +884,58 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         event_indices = self.get_session_event_indices(session_index)
         return [LazyLoadInferenceAPIData(data_index=idx) for idx in event_indices]
 
+    def record_session_metric(self, metric: SessionLifecycleMetric) -> None:
+        """Record a completed session's lifecycle metric."""
+        self._session_metrics.append(metric)
+
+    def get_session_metrics(self) -> List[SessionLifecycleMetric]:
+        """Return all recorded session lifecycle metrics."""
+        return self._session_metrics
+
+    def build_session_metric(
+        self,
+        session_id: str,
+        stage_id: int,
+        start_time: float,
+        end_time: float,
+    ) -> SessionLifecycleMetric:
+        """Build a SessionLifecycleMetric for a completed session.
+
+        Token totals are left at 0 here and filled in later by the report
+        generator once all metrics have been collected (the multiprocess
+        collector only exposes metrics after the full run completes).
+
+        Args:
+            session_id: The session ID
+            stage_id: The stage this session ran in
+            start_time: Wall-clock epoch when the session was dispatched
+            end_time: Wall-clock epoch when the session completed
+        """
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            raise ValueError(f"Unknown session: {session_id}")
+
+        # Find the file_path for this session
+        file_path = ""
+        for session in self.sessions:
+            if session.session_id == session_id:
+                file_path = str(session.file_path)
+                break
+
+        num_nodes = len(state.graph.nodes)
+        num_nodes_completed = len(state.completed_nodes)
+
+        return SessionLifecycleMetric(
+            session_id=session_id,
+            stage_id=stage_id,
+            file_path=file_path,
+            start_time=start_time,
+            end_time=end_time,
+            duration_sec=end_time - start_time,
+            num_nodes=num_nodes,
+            num_nodes_completed=num_nodes_completed,
+        )
+
     def activate_session(self, session_id: str) -> None:
         """Internal method to activate a session (mark nodes as ready).
 
@@ -935,8 +990,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
 
         return is_complete
 
-        return False
-    
     def load_lazy_data(self, data: LazyLoadInferenceAPIData) -> InferenceAPIData:
         """Load the actual request data for a given index.
 

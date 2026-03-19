@@ -370,6 +370,7 @@ class LoadGenerator:
             range(stage_start_cursor, stage_start_cursor + effective_num_sessions)
         )  # Sessions waiting to start
         completed_session_ids: Set[str] = set()  # Session IDs that have completed
+        session_dispatch_times: Dict[str, float] = {}  # session_id → wall-clock dispatch time
 
         # Track dispatch timing
         sessions_dispatched = 0
@@ -420,6 +421,9 @@ class LoadGenerator:
             # Activate session in DataGen (marks root nodes as ready)
             self.datagen.activate_session(session_id)
 
+            # Record dispatch time for session duration tracking
+            session_dispatch_times[session_id] = time.time()
+
             # Get all events for this session
             events = self.datagen.get_session_events(session_idx)
 
@@ -430,6 +434,9 @@ class LoadGenerator:
                 worker_id = lazy_data.prefered_worker_id
                 if worker_id >= 0:
                     worker_id = worker_id % active_workers
+
+                # Stamp session_id so the client can attach it to RequestLifecycleMetric
+                lazy_data.session_id = session_id
 
                 event_time = time.perf_counter()
                 request_queue.put((stage_id, lazy_data, event_time, lora_adapter), worker_id)
@@ -489,10 +496,19 @@ class LoadGenerator:
                 # Remove completed sessions from active pool and clean up memory
                 for session_idx in newly_completed:
                     active_session_indices.discard(session_idx)
-                    
-                    # Clean up completed session data to prevent memory leaks
+
+                    # Build and record session-level metric before cleanup
                     session_info = self.datagen.get_session_info(session_idx)
                     session_id = session_info["session_id"]
+                    session_metric = self.datagen.build_session_metric(
+                        session_id=session_id,
+                        stage_id=stage_id,
+                        start_time=session_dispatch_times.get(session_id, start_time_epoch),
+                        end_time=time.time(),
+                    )
+                    self.datagen.record_session_metric(session_metric)
+
+                    # Clean up completed session data to prevent memory leaks
                     self.datagen.cleanup_session(session_id)
 
                 # Try to start new sessions to fill the pool

@@ -19,12 +19,12 @@ from typing import Any, List, Optional
 import numpy as np
 from pydantic import BaseModel
 
-from inference_perf.apis import RequestLifecycleMetric
+from inference_perf.apis import RequestLifecycleMetric, SessionLifecycleMetric
 from inference_perf.client.metricsclient import MetricsClient, PerfRuntimeParameters
 from inference_perf.client.metricsclient.base import ModelServerMetrics
 from inference_perf.client.metricsclient.prometheus_client import PrometheusMetricsClient
 from inference_perf.client.requestdatacollector import RequestDataCollector
-from inference_perf.config import Config, PrometheusMetricsReportConfig, ReportConfig
+from inference_perf.config import Config, PrometheusMetricsReportConfig, ReportConfig, SessionLifecycleReportConfig
 from inference_perf.utils import ReportFile
 
 logger = logging.getLogger(__name__)
@@ -457,10 +457,12 @@ class ReportGenerator:
         metrics_client: Optional[MetricsClient],
         metrics_collector: RequestDataCollector,
         config: "Config",
+        datagen: Optional[Any] = None,
     ) -> None:
         self.metrics_collector = metrics_collector
         self.metrics_client = metrics_client
         self.config = config
+        self.datagen = datagen
 
     def get_metrics_collector(self) -> RequestDataCollector:
         """
@@ -563,8 +565,99 @@ class ReportGenerator:
         if report_config.prometheus:
             lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
 
+        # Session-level reports (OTel agentic workloads only)
+        from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
+        if isinstance(self.datagen, OTelTraceReplayDataGenerator) and report_config.session_lifecycle:
+            session_reports = self.generate_session_reports(
+                self.datagen.get_session_metrics(),
+                report_config.session_lifecycle,
+                percentiles,
+            )
+            lifecycle_reports.extend(session_reports)
+
         lifecycle_reports.append(self.generate_config_report())
         return lifecycle_reports
+
+    def summarize_sessions(
+        self, metrics: List[SessionLifecycleMetric], percentiles: List[float]
+    ) -> dict:
+        """Compute aggregated stats across a list of session lifecycle metrics."""
+        num_sessions = len(metrics)
+        num_succeeded = sum(1 for m in metrics if m.success is True)
+        num_failed = sum(1 for m in metrics if m.success is False)
+
+        sessions_per_second = 0.0
+        if num_sessions > 0:
+            total_span = max(m.end_time for m in metrics) - min(m.start_time for m in metrics)
+            if total_span > 0:
+                sessions_per_second = num_sessions / total_span
+
+        return {
+            "num_sessions": num_sessions,
+            "num_sessions_succeeded": num_succeeded,
+            "num_sessions_failed": num_failed,
+            "sessions_per_second": sessions_per_second,
+            "session_duration_sec": summarize([m.duration_sec for m in metrics], percentiles),
+            "num_nodes": summarize([float(m.num_nodes) for m in metrics], percentiles),
+            "total_input_tokens": summarize([float(m.total_input_tokens) for m in metrics if m.total_input_tokens is not None], percentiles),
+            "total_output_tokens": summarize([float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles),
+        }
+
+    def generate_session_reports(
+        self,
+        session_metrics: List[SessionLifecycleMetric],
+        report_config: SessionLifecycleReportConfig,
+        percentiles: List[float],
+    ) -> List[ReportFile]:
+        """Generate session-level lifecycle reports."""
+        reports: List[ReportFile] = []
+
+        if not session_metrics:
+            return reports
+
+        # Enrich session metrics with token totals and error/success now that
+        # the collector is fully populated (multiprocess collector only has
+        # data after the run completes).
+        request_metrics = self.metrics_collector.get_metrics()
+        token_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+        error_by_session: dict[str, Optional[Any]] = {}
+        for m in request_metrics:
+            if m.session_id:
+                inp, out = token_by_session[m.session_id]
+                token_by_session[m.session_id] = (inp + m.info.input_tokens, out + m.info.output_tokens)
+                if m.session_id not in error_by_session and m.error is not None:
+                    error_by_session[m.session_id] = m.error
+
+        for sm in session_metrics:
+            inp, out = token_by_session.get(sm.session_id, (0, 0))
+            sm.total_input_tokens = inp
+            sm.total_output_tokens = out
+            sm.error = error_by_session.get(sm.session_id)
+            sm.success = (sm.num_nodes_completed == sm.num_nodes) and (sm.error is None)
+
+        if report_config.summary:
+            reports.append(ReportFile(
+                name="summary_session_lifecycle_metrics",
+                contents=self.summarize_sessions(session_metrics, percentiles),
+            ))
+
+        if report_config.per_stage:
+            stage_buckets: dict[int, List[SessionLifecycleMetric]] = defaultdict(list)
+            for m in session_metrics:
+                stage_buckets[m.stage_id].append(m)
+            for stage_id, stage_metrics in stage_buckets.items():
+                reports.append(ReportFile(
+                    name=f"stage_{stage_id}_session_lifecycle_metrics",
+                    contents=self.summarize_sessions(stage_metrics, percentiles),
+                ))
+
+        if report_config.per_session:
+            reports.append(ReportFile(
+                name="per_session_lifecycle_metrics",
+                contents=[m.model_dump() for m in session_metrics],
+            ))
+
+        return reports
 
     def generate_prometheus_metrics_report(
         self, runtime_parameters: PerfRuntimeParameters, report_config: PrometheusMetricsReportConfig

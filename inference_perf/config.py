@@ -396,9 +396,16 @@ class PrometheusMetricsReportConfig(BaseModel):
     per_stage: Optional[bool] = False
 
 
+class SessionLifecycleReportConfig(BaseModel):
+    summary: Optional[bool] = True
+    per_stage: Optional[bool] = True
+    per_session: Optional[bool] = False
+
+
 class ReportConfig(BaseModel):
     request_lifecycle: RequestLifecycleMetricsReportConfig = RequestLifecycleMetricsReportConfig()
     prometheus: Optional[PrometheusMetricsReportConfig] = PrometheusMetricsReportConfig()
+    session_lifecycle: SessionLifecycleReportConfig = SessionLifecycleReportConfig()
 
 
 class PrometheusClientConfig(BaseModel):
