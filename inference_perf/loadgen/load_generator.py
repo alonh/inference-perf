@@ -49,7 +49,7 @@ else:
     # Runtime usage will still require Python 3.11+.
     TaskGroup = object
 
-from typing import List, Tuple, Optional, NamedTuple, Union
+from typing import List, Tuple, Optional, NamedTuple, Union, Set, Dict
 from types import FrameType
 import time
 import multiprocessing as mp
