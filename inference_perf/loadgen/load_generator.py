@@ -174,12 +174,17 @@ class Worker(mp.Process):
                         if hasattr(request_data, "wait_for_predecessors_and_substitute"):
                             await request_data.wait_for_predecessors_and_substitute()
 
+                        # Check if request should be skipped (e.g., session failed in OTel replay)
+                        if hasattr(request_data, "skip_request") and request_data.skip_request:
+                            logger.info(f"[DEBUG] Skipping request - session failure detected: {getattr(request_data, 'node_id', 'unknown')}")
+                            return  # Exit this task, finally block will clean up
+
                         with self.active_requests_counter.get_lock():
                             self.active_requests_counter.value += 1
                             inflight = True
                         
                         error = await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
-                        
+
                         # Check if this was an OTel request and if it failed (HTTP error)
                         if error is not None and hasattr(request_data, "process_failure"):
                             exception = Exception(
@@ -194,6 +199,9 @@ class Worker(mp.Process):
                             )
                     except CancelledError:
                         pass
+                    except Exception as e:
+                        logger.error(f"[DEBUG] Exception in task: {type(e).__name__}: {e}", exc_info=True)
+                        raise
                     finally:
                         with self.active_requests_counter.get_lock():
                             if inflight:

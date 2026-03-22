@@ -174,7 +174,7 @@ def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
             msgs = json.loads(out)
             if len(msgs) > 1:
                 raise ValueError(f"Unexpected output messages fromat: expected a single message, got {len(msgs)} messages")
-            return ComplexOtelMessage(role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_input(msgs[0]))
+            return ComplexOtelMessage(role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_output(msgs[0]))
         except Exception:
             raise ValueError(f"Failed parsing {out}")
     if isinstance(out, list) and out:
@@ -751,12 +751,19 @@ def _fmt_ms(ms: int) -> str:
     return f"{ms / 1000:.1f}s"
 
 
+def _shorten_string(s: str, max_length: int = 100) -> str:
+    if len(s) < max_length:
+        return s
+    side_length = (max_length - 3) // 2  # 3 for '...'
+    return f"{s[:side_length]} ... ... {s[-side_length:]}"
+
+
 def _segment_label(seg: InputSegment, messages: List[Dict[str, str]]) -> str:
     """One-line label for an input segment."""
     type_labels = {"shared": "SHARED", "output": "OUTPUT", "unique": "UNIQUE"}
     label = type_labels.get(seg.type, seg.type.upper())
     src = f" <- {seg.source_node_id}" if seg.source_node_id else ""
-    messages = "\n\t\t\t".join(f"{x['role']} : {x['content']}" for x in messages)
+    messages = "\n\t\t\t".join(f"{x['role']} : {_shorten_string(x['content'])}" for x in messages)
     return f"{label}({seg.message_count}msg/{seg.token_count}t{src})\n\t\t\t{messages}"
 
 

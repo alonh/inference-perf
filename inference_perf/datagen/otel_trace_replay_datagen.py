@@ -122,10 +122,33 @@ class NodeOutputRegistry:
             # Shared across processes via manager proxy
             self._node_output_text: Dict[str, str] = manager.dict()  # type: ignore[assignment]
             self._node_input_messages: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
+            self._failed_sessions: Dict[str, bool] = manager.dict()  # type: ignore[assignment]
+
         else:
             # Single-process fallback (e.g., tests, num_workers=0)
             self._node_output_text = {}
             self._node_input_messages = {}
+            self._failed_sessions = {}
+
+    def mark_session_failed(self, session_id: str) -> None:
+        """Mark a session as failed.
+
+        Args:
+            session_id: The session ID to mark as failed
+        """
+        self._failed_sessions[session_id] = True
+        logger.debug(f"Marked session {session_id} as failed")
+
+    def is_session_failed(self, session_id: str) -> bool:
+        """Check if a session has been marked as failed.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if the session has been marked as failed, False otherwise
+        """
+        return self._failed_sessions.get(session_id, False)
 
     def record(self, node_id: str, output_text: str, messages=None) -> None:
         """Register the actual output text for a completed node.
@@ -273,6 +296,9 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     # Completion callback for graph traversal
     completion_callback: Optional[Callable[[str, float], None]] = None
     
+    # Flag to skip HTTP request (set when session fails)
+    skip_request: bool = False
+
     async def wait_for_predecessors_and_substitute(self) -> None:
         """Wait for predecessors asynchronously and substitute output segments.
         
@@ -281,10 +307,29 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         are available, then substitutes "output" segments with actual predecessor
         outputs instead of the recorded assistant messages.
         
+        If the session has failed, this method skips processing and registers
+        empty output to unblock dependent nodes.
+
         The waiting is done in an executor to avoid blocking the event loop.
         """
         import asyncio
         
+        # Extract session_id from node_id (format: "session_id:node_xxx")
+        session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
+
+        # Check if session has failed BEFORE waiting - if so, skip all processing
+        if self.registry.is_session_failed(session_id):
+            logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (pre-wait check)")
+            # Set flag to skip HTTP request
+            self.skip_request = True
+            # Register empty output to unblock any dependent nodes
+            self.registry.record(self.node_id, "", self.messages)
+            if self.completion_callback:
+                logger.debug(f"[DEBUG] Calling completion_callback for skipped node (pre-wait): {self.node_id}")
+                self.completion_callback(self.node_id, time.perf_counter())
+                logger.debug(f"[DEBUG] completion_callback returned for: {self.node_id}")
+            return
+
         if self.predecessor_node_ids:
             logger.debug(
                 f"Node {self.node_id} waiting for {len(self.predecessor_node_ids)} predecessor(s): "
@@ -299,7 +344,21 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 3600.0  # 1 hour timeout
             )
             logger.debug(f"Node {self.node_id} predecessors completed")
-        
+
+            # Check AGAIN if session has failed AFTER waiting for predecessors
+            # (a predecessor might have failed while we were waiting)
+            if self.registry.is_session_failed(session_id):
+                logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (post-wait check)")
+                # Set flag to skip HTTP request
+                self.skip_request = True
+                # Register empty output to unblock any dependent nodes
+                self.registry.record(self.node_id, "", self.messages)
+                if self.completion_callback:
+                    logger.debug(f"[DEBUG] Calling completion_callback for skipped node (post-wait): {self.node_id}")
+                    self.completion_callback(self.node_id, time.perf_counter())
+                    logger.debug(f"[DEBUG] completion_callback returned for: {self.node_id}")
+                return
+
         # Wait additional delay specified in wait_ms
         if self.wait_ms > 0:
             wait_sec = self.wait_ms / 1000.0
@@ -502,8 +561,10 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         )
 
         # Extract session_id from node_id (format: "session_id:node_xxx")
-        # Mark the entire session as failed so other nodes in this session will skip processing
         session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
+
+        # Mark the entire session as failed to prevent other nodes from processing
+        self.registry.mark_session_failed(session_id)
 
         # Create empty inference info
         empty_info = OTelInferenceInfo(
