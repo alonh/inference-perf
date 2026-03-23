@@ -370,15 +370,14 @@ data:
       "gpt-3.5-turbo": "my-other-model"
 
     # Generation parameters
-    default_max_tokens: 1000                      # Fallback if not in trace
+    default_max_tokens: 1000                      # Fallback if output tokens are set to 0 in the otel file
 
     # Dependency inference
     dependency_window_ms: 120000                  # Max time window for causal dependency detection
 
     # Error handling
-    include_errors: false                         # Skip spans with error status (default)
-    skip_invalid_files: true                      # Skip unparseable trace files
-    validate_dependencies: false                  # Log dependency graph warnings
+    include_errors: false                         # Skip spans with error status, that is, status != 0 (default)
+    skip_invalid_files: true                      # Skip unparseable trace files during replay
 
 load:
   type: trace_session_replay                      # Required for otel_trace_replay

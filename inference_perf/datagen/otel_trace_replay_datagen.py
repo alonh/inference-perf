@@ -750,9 +750,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                         raise
         elif self.load_mode == "directory":
             # Directory mode: load all JSON files from the directory
-            if self.trace_dir is None:
-                raise ValueError("trace_dir must be set for directory mode")
-            
             trace_files = sorted(self.trace_dir.glob("*.json"))
             
             if not trace_files:

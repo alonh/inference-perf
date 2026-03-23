@@ -18,7 +18,6 @@ data:
     dependency_window_ms: 120000
     include_errors: false
     skip_invalid_files: true
-    validate_dependencies: true
 
 load:
   type: trace_session_replay
@@ -43,3 +42,4 @@ report:
     per_request: false
 
 # Made with Bob
+
