@@ -570,6 +570,7 @@ class ReportGenerator:
 
         # Session-level reports (OTel agentic workloads only)
         from inference_perf.datagen import TraceGenerator
+
         if isinstance(self.datagen, TraceGenerator) and report_config.session_lifecycle:
             session_reports = self.generate_session_reports(
                 self.datagen.get_session_metrics(),
@@ -581,9 +582,7 @@ class ReportGenerator:
         lifecycle_reports.append(self.generate_config_report())
         return lifecycle_reports
 
-    def summarize_sessions(
-        self, metrics: List[SessionLifecycleMetric], percentiles: List[float]
-    ) -> dict:
+    def summarize_sessions(self, metrics: List[SessionLifecycleMetric], percentiles: List[float]) -> dict:
         """Compute aggregated stats across a list of session lifecycle metrics."""
         num_sessions = len(metrics)
         num_succeeded = sum(1 for m in metrics if m.success is True)
@@ -602,8 +601,12 @@ class ReportGenerator:
             "sessions_per_second": sessions_per_second,
             "session_duration_sec": summarize([m.duration_sec for m in metrics], percentiles),
             "num_nodes": summarize([float(m.num_nodes) for m in metrics], percentiles),
-            "total_input_tokens": summarize([float(m.total_input_tokens) for m in metrics if m.total_input_tokens is not None], percentiles),
-            "total_output_tokens": summarize([float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles),
+            "total_input_tokens": summarize(
+                [float(m.total_input_tokens) for m in metrics if m.total_input_tokens is not None], percentiles
+            ),
+            "total_output_tokens": summarize(
+                [float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles
+            ),
         }
 
     def generate_session_reports(
@@ -639,26 +642,32 @@ class ReportGenerator:
             sm.success = (sm.num_nodes_completed == sm.num_nodes) and (sm.error is None)
 
         if report_config.summary:
-            reports.append(ReportFile(
-                name="summary_session_lifecycle_metrics",
-                contents=self.summarize_sessions(session_metrics, percentiles),
-            ))
+            reports.append(
+                ReportFile(
+                    name="summary_session_lifecycle_metrics",
+                    contents=self.summarize_sessions(session_metrics, percentiles),
+                )
+            )
 
         if report_config.per_stage:
             stage_buckets: dict[int, List[SessionLifecycleMetric]] = defaultdict(list)
             for m in session_metrics:
                 stage_buckets[m.stage_id].append(m)
             for stage_id, stage_metrics in stage_buckets.items():
-                reports.append(ReportFile(
-                    name=f"stage_{stage_id}_session_lifecycle_metrics",
-                    contents=self.summarize_sessions(stage_metrics, percentiles),
-                ))
+                reports.append(
+                    ReportFile(
+                        name=f"stage_{stage_id}_session_lifecycle_metrics",
+                        contents=self.summarize_sessions(stage_metrics, percentiles),
+                    )
+                )
 
         if report_config.per_session:
-            reports.append(ReportFile(
-                name="per_session_lifecycle_metrics",
-                contents=[m.model_dump() for m in session_metrics],
-            ))
+            reports.append(
+                ReportFile(
+                    name="per_session_lifecycle_metrics",
+                    contents=[m.model_dump() for m in session_metrics],
+                )
+            )
 
         return reports
 

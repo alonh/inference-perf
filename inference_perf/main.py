@@ -271,7 +271,7 @@ def main_cli() -> None:
                 DataGenType.CNNDailyMail,
                 DataGenType.InfinityInstruct,
                 DataGenType.BillsumConversations,
-                DataGenType.OTelTraceReplay
+                DataGenType.OTelTraceReplay,
             }
         ):
             if tokenizer is None:

@@ -36,7 +36,6 @@ Falls back to len(text) // 4 (rough chars-per-token estimate) per message.
 """
 
 import argparse
-import ast
 import json
 import logging
 import re
@@ -51,15 +50,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class OtelMessage():
+class OtelMessage:
     role: str
     text: str
 
 
-class ComplexOtelMessage(OtelMessage): #usually, this message type can be user in the list of input messages.
-    def __init__(self, role:str , message_info: dict[str, Any], raw_reconstructed_text: str):
+class ComplexOtelMessage(OtelMessage):  # usually, this message type can be user in the list of input messages.
+    def __init__(self, role: str, message_info: dict[str, Any], raw_reconstructed_text: str):
         super().__init__(role=role, text=raw_reconstructed_text)
-        self.message_info=message_info
+        self.message_info = message_info
+
 
 # ---------------------------------------------------------------------------
 # Text helpers
@@ -157,8 +157,7 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
                 }
 
                 """
-                res.append(
-                    ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
+                res.append(ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
         return res
     else:
         return []
@@ -177,7 +176,9 @@ def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
             msgs = json.loads(out)
             if len(msgs) > 1:
                 raise ValueError(f"Unexpected output messages fromat: expected a single message, got {len(msgs)} messages")
-            return ComplexOtelMessage(role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_output(msgs[0]))
+            return ComplexOtelMessage(
+                role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_output(msgs[0])
+            )
         except Exception as err:
             raise ValueError(f"Failed parsing {out}") from err
     if isinstance(out, list) and out:
@@ -286,10 +287,10 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
 
         prompt_tokens = attrs.get("gen_ai.usage.prompt_tokens")
         if prompt_tokens is None:
-            prompt_tokens = attrs.get('gen_ai.usage.input_tokens')
+            prompt_tokens = attrs.get("gen_ai.usage.input_tokens")
         completion_tokens = attrs.get("gen_ai.usage.completion_tokens")
         if completion_tokens is None:
-            completion_tokens = attrs.get('gen_ai.usage.output_tokens')
+            completion_tokens = attrs.get("gen_ai.usage.output_tokens")
         if prompt_tokens is not None:
             prompt_tokens = int(prompt_tokens)
 
@@ -507,7 +508,7 @@ class GraphCall:
     call_id: str
     model: str
     messages: List[OtelMessage]  # original messages (for replay)
-    expected_output: str # original output
+    expected_output: str  # original output
     input_segments: List[InputSegment]
     total_input_tokens: int
     expected_output_tokens: int  # set max_tokens to this; disable EOS for downstream prefix
@@ -595,8 +596,8 @@ def build_graph(
         return False
 
     def is_valid_predecessor(predecessor_candidate, curr_call):
-        #checks if candidate can be a predecessor to curr_call. Make sure times are not overlapping
-        #since the nodes are sorted, we can assume the candidate doesn't start after curr_call
+        # checks if candidate can be a predecessor to curr_call. Make sure times are not overlapping
+        # since the nodes are sorted, we can assume the candidate doesn't start after curr_call
         if curr_call.t_start_ms < predecessor_candidate.t_end_ms:
             # curr starts before the candidate ends.
             return False
@@ -617,9 +618,9 @@ def build_graph(
             predecessor_indices[i] = direct_preds
             is_causal_edge[i] = True
         else:
-            predecessor_index = 0 #default value - the predecessor is the first node
+            predecessor_index = 0  # default value - the predecessor is the first node
             # No causal predecessor — look for the closest possible predecessor. It's not necessaritly the immediate predecessor, as they can be executed in parallel
-            for j in range(i-1, -1, -1):
+            for j in range(i - 1, -1, -1):
                 if is_valid_predecessor(calls[j], calls[i]):
                     predecessor_index = j
                     break
@@ -652,7 +653,7 @@ def build_graph(
 
         # Decompose input into message-level segments
         segments = decompose_input(rc, ancestor_calls, ancestor_node_ids)
-        
+
         # Validate that segment message counts sum to total messages
         total_segment_messages = sum(seg.message_count for seg in segments)
         actual_message_count = len(rc.messages)
@@ -664,13 +665,17 @@ def build_graph(
 
         total_input_tokens = rc.prompt_tokens if rc.prompt_tokens is not None else sum(message_tokens(m) for m in rc.messages)
         expected_output_tokens = (
-            rc.completion_tokens if rc.completion_tokens is not None else estimate_tokens(rc.out_message.text or "" if rc.out_message else "")
+            rc.completion_tokens
+            if rc.completion_tokens is not None
+            else estimate_tokens(rc.out_message.text or "" if rc.out_message else "")
         )
 
         graph_call = GraphCall(
             call_id=rc.call_id,
             model=rc.model,
-            messages=[{"role": x.role, "content": x.text} for x in rc.messages], #convert to a list of dictionaries representing a message with role and content only.
+            messages=[
+                {"role": x.role, "content": x.text} for x in rc.messages
+            ],  # convert to a list of dictionaries representing a message with role and content only.
             expected_output=(rc.out_message.text or "" if rc.out_message else ""),
             input_segments=segments,
             total_input_tokens=total_input_tokens,
@@ -801,6 +806,7 @@ def _topo_order(graph: ReplayGraph) -> List[str]:
             queue.append(succ_id)
     return order
 
+
 def map_input_seq_to_messages(gc):
     """
     returns a list of tuples, each tuple contains the sequence, and the corresponding messages
@@ -808,9 +814,10 @@ def map_input_seq_to_messages(gc):
     curr_msg_index = 0
     res = []
     for seq in gc.input_segments:
-        res.append((seq,gc.messages[curr_msg_index: curr_msg_index + seq.message_count]))
+        res.append((seq, gc.messages[curr_msg_index : curr_msg_index + seq.message_count]))
         curr_msg_index += seq.message_count
     return res
+
 
 def print_graph(graph: ReplayGraph) -> None:
     """Pretty-print the replay graph to stdout with box-drawing characters."""
@@ -862,7 +869,7 @@ def print_graph(graph: ReplayGraph) -> None:
         print(f"  ║     Input  ({gc.total_input_tokens} tokens, {len(gc.messages)} messages):")
         for seg, messages in map_input_seq_to_messages(gc):
             offset = "       "
-            segment_label = _segment_label(seg, messages).replace('\n', f'\n{offset}')
+            segment_label = _segment_label(seg, messages).replace("\n", f"\n{offset}")
             print(f"  ║{offset}* {segment_label}")
         out_note = f"   (max_tokens_recorded={gc.max_tokens_recorded})" if gc.max_tokens_recorded else ""
         print(f"  ║     Output: {gc.expected_output_tokens} tokens expected{out_note}")

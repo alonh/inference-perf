@@ -86,7 +86,7 @@ def _extract_message(data: Any) -> Optional[Dict]:
     if isinstance(data, list):
         # Find the assistant message
         for item in data:
-            if isinstance(item, dict) and item.get('role') == 'assistant':
+            if isinstance(item, dict) and item.get("role") == "assistant":
                 return item
         # If no role specified, return first item
         if data and isinstance(data[0], dict):
@@ -94,18 +94,18 @@ def _extract_message(data: Any) -> Optional[Dict]:
 
     elif isinstance(data, dict):
         # Check for OpenAI choices format
-        if 'choices' in data and data['choices']:
-            choice = data['choices'][0]
-            if 'message' in choice:
-                return choice['message']
+        if "choices" in data and data["choices"]:
+            choice = data["choices"][0]
+            if "message" in choice:
+                return choice["message"]
             return choice
 
         # Check for direct message key
-        if 'message' in data:
-            return data['message']
+        if "message" in data:
+            return data["message"]
 
         # Check if data itself is a message
-        if 'role' in data or 'content' in data or 'parts' in data or 'tool_calls' in data:
+        if "role" in data or "content" in data or "parts" in data or "tool_calls" in data:
             return data
 
     return None
@@ -123,8 +123,8 @@ def _extract_text_content(message: Dict) -> str:
     text_parts = []
 
     # Check for direct content field
-    if 'content' in message:
-        content = message['content']
+    if "content" in message:
+        content = message["content"]
 
         if isinstance(content, str):
             if content:  # Only add non-null, non-empty strings
@@ -134,21 +134,21 @@ def _extract_text_content(message: Dict) -> str:
             # Handle content as list of parts
             for part in content:
                 if isinstance(part, dict):
-                    if part.get('type') == 'text' and 'text' in part:
-                        text_parts.append(part['text'])
-                    elif 'text' in part:
-                        text_parts.append(part['text'])
+                    if part.get("type") == "text" and "text" in part:
+                        text_parts.append(part["text"])
+                    elif "text" in part:
+                        text_parts.append(part["text"])
                 elif isinstance(part, str):
                     text_parts.append(part)
 
     # Check for parts field (OTEL format)
-    if 'parts' in message:
-        for part in message['parts']:
+    if "parts" in message:
+        for part in message["parts"]:
             if isinstance(part, dict):
-                if part.get('type') == 'text' and 'text' in part:
-                    text_parts.append(part['text'])
-                elif part.get('type') == 'text' and 'content' in part:
-                    text_parts.append(part['content'])
+                if part.get("type") == "text" and "text" in part:
+                    text_parts.append(part["text"])
+                elif part.get("type") == "text" and "content" in part:
+                    text_parts.append(part["content"])
 
     return "\n".join(text_parts)
 
@@ -165,38 +165,29 @@ def _extract_tool_calls(message: Dict) -> List[Dict]:
     tool_calls = []
 
     # Check for tool_calls field (OpenAI format)
-    if 'tool_calls' in message and message['tool_calls']:
-        for tc in message['tool_calls']:
+    if "tool_calls" in message and message["tool_calls"]:
+        for tc in message["tool_calls"]:
             if isinstance(tc, dict):
                 # OpenAI format: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
-                if 'function' in tc:
-                    tool_calls.append({
-                        'id': tc.get('id'),
-                        'name': tc['function'].get('name'),
-                        'arguments': tc['function'].get('arguments')
-                    })
+                if "function" in tc:
+                    tool_calls.append(
+                        {"id": tc.get("id"), "name": tc["function"].get("name"), "arguments": tc["function"].get("arguments")}
+                    )
                 # Direct format: {"name": "...", "arguments": "..."}
-                elif 'name' in tc:
+                elif "name" in tc:
                     tool_calls.append(tc)
 
     # Check for parts field (OTEL format)
-    if 'parts' in message:
-        for part in message['parts']:
-            if isinstance(part, dict) and part.get('type') == 'tool_call':
-                tool_calls.append({
-                    'id': part.get('id'),
-                    'name': part.get('name'),
-                    'arguments': part.get('arguments')
-                })
+    if "parts" in message:
+        for part in message["parts"]:
+            if isinstance(part, dict) and part.get("type") == "tool_call":
+                tool_calls.append({"id": part.get("id"), "name": part.get("name"), "arguments": part.get("arguments")})
 
     # Check for legacy function_call field
-    if 'function_call' in message and message['function_call']:
-        fc = message['function_call']
+    if "function_call" in message and message["function_call"]:
+        fc = message["function_call"]
         if isinstance(fc, dict):
-            tool_calls.append({
-                'name': fc.get('name'),
-                'arguments': fc.get('arguments')
-            })
+            tool_calls.append({"name": fc.get("name"), "arguments": fc.get("arguments")})
 
     return tool_calls
 
@@ -207,8 +198,8 @@ def _format_tool_call(tool_call: Dict) -> str:
 
     Uses special token format which is closest to what models actually generate.
     """
-    function_name = tool_call.get('name', 'unknown_function')
-    arguments = tool_call.get('arguments', '{}')
+    function_name = tool_call.get("name", "unknown_function")
+    arguments = tool_call.get("arguments", "{}")
 
     # If arguments is a dict, serialize it
     if isinstance(arguments, dict):
@@ -221,23 +212,23 @@ def _format_tool_call(tool_call: Dict) -> str:
 def reconstruct_llm_input(input_message: Union[str, Dict]) -> str:
     """
     Reconstruct the raw LLM input from a single parsed message structure.
-    
+
     This function takes a single message from gen_ai.input.messages field from OTEL traces
     and reconstructs what the actual message content text would look like, handling:
     - Complex nested content structures
     - Tool calls and tool results
     - Escaped strings and JSON structures
-    
+
     Note: This returns ONLY the content text, without role prefixes.
-    
+
     Args:
         input_message: Can be:
             - A JSON string representing a single message
             - A single message dict
-    
+
     Returns:
         String representation of the message content (for token estimation)
-    
+
     Example:
         >>> otel_input = '{"role": "user", "content": "Hello"}'
         >>> raw_input = reconstruct_llm_input(otel_input)
@@ -251,114 +242,114 @@ def reconstruct_llm_input(input_message: Union[str, Dict]) -> str:
         except json.JSONDecodeError:
             # If it's not JSON, return as-is
             return input_message
-    
+
     if not isinstance(input_message, dict):
         return ""
-    
+
     # Extract content (no role prefix)
-    content = input_message.get('content')
-    
+    content = input_message.get("content")
+
     if content is None:
         # Check for parts field (OTEL format)
-        if 'parts' in input_message:
-            return _extract_content_from_parts(input_message['parts'])
-        
+        if "parts" in input_message:
+            return _extract_content_from_parts(input_message["parts"])
+
         # Check for tool_calls field (assistant messages with only tool calls)
-        if 'tool_calls' in input_message:
+        if "tool_calls" in input_message:
             tool_calls = _extract_tool_calls(input_message)
             if tool_calls:
                 return "\n".join(_format_tool_call(tc) for tc in tool_calls)
-        
+
         return ""
     elif isinstance(content, str):
         return content
     elif isinstance(content, list):
         # Handle content as list of parts
         return _extract_content_from_list(content)
-    
+
     return ""
 
 
 def _extract_content_from_parts(parts: List[Dict]) -> str:
     """Extract text content from OTEL parts format."""
     content_parts = []
-    
+
     for part in parts:
         if not isinstance(part, dict):
             continue
-        
-        part_type = part.get('type', '')
-        
-        if part_type == 'text':
+
+        part_type = part.get("type", "")
+
+        if part_type == "text":
             # Text content
-            if 'text' in part:
-                content_parts.append(part['text'])
-            elif 'content' in part:
-                content_parts.append(part['content'])
-        
-        elif part_type == 'tool_call':
+            if "text" in part:
+                content_parts.append(part["text"])
+            elif "content" in part:
+                content_parts.append(part["content"])
+
+        elif part_type == "tool_call":
             # Tool call (OTEL output format)
-            tool_name = part.get('name', 'unknown_tool')
-            tool_args = part.get('arguments', '{}')
+            tool_name = part.get("name", "unknown_tool")
+            tool_args = part.get("arguments", "{}")
             if isinstance(tool_args, dict):
                 tool_args = json.dumps(tool_args, indent=2)
             content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_args}</tool_args></tool_call>")
-        
-        elif part_type == 'tool_result':
+
+        elif part_type == "tool_result":
             # Tool result
-            tool_id = part.get('tool_use_id', 'unknown')
-            result_content = part.get('content', '')
-            is_error = part.get('is_error', False)
+            tool_id = part.get("tool_use_id", "unknown")
+            result_content = part.get("content", "")
+            is_error = part.get("is_error", False)
             error_marker = " [ERROR]" if is_error else ""
             content_parts.append(f"<tool_result: {tool_id}{error_marker}>\n{result_content}\n</tool_result>")
-        
-        elif part_type == 'tool_use':
+
+        elif part_type == "tool_use":
             # Tool use (input format - same as tool_call)
-            tool_name = part.get('name', 'unknown_tool')
-            tool_input = part.get('input', {})
+            tool_name = part.get("name", "unknown_tool")
+            tool_input = part.get("input", {})
             if isinstance(tool_input, dict):
                 tool_input = json.dumps(tool_input, indent=2)
             content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_input}</tool_args></tool_call>")
-    
+
     return "\n".join(content_parts)
 
 
 def _extract_content_from_list(content_list: List) -> str:
     """Extract text content from content list format."""
     content_parts = []
-    
+
     for item in content_list:
         if isinstance(item, str):
             content_parts.append(item)
         elif isinstance(item, dict):
-            item_type = item.get('type', '')
-            
-            if item_type == 'text':
-                if 'text' in item:
-                    content_parts.append(item['text'])
-                elif 'content' in item:
-                    content_parts.append(item['content'])
-            
-            elif item_type == 'tool_result':
-                tool_id = item.get('tool_use_id', 'unknown')
-                result_content = item.get('content', '')
-                is_error = item.get('is_error', False)
+            item_type = item.get("type", "")
+
+            if item_type == "text":
+                if "text" in item:
+                    content_parts.append(item["text"])
+                elif "content" in item:
+                    content_parts.append(item["content"])
+
+            elif item_type == "tool_result":
+                tool_id = item.get("tool_use_id", "unknown")
+                result_content = item.get("content", "")
+                is_error = item.get("is_error", False)
                 error_marker = " [ERROR]" if is_error else ""
                 content_parts.append(f"<tool_result: {tool_id}{error_marker}>\n{result_content}\n</tool_result>")
-            
-            elif item_type == 'tool_use':
-                tool_name = item.get('name', 'unknown_tool')
-                tool_input = item.get('input', {})
+
+            elif item_type == "tool_use":
+                tool_name = item.get("name", "unknown_tool")
+                tool_input = item.get("input", {})
                 if isinstance(tool_input, dict):
                     tool_input = json.dumps(tool_input, indent=2)
                 content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_input}</tool_args></tool_call>")
-            
+
             # Handle other dict formats
-            elif 'text' in item:
-                content_parts.append(item['text'])
-            elif 'content' in item:
-                content_parts.append(str(item['content']))
-    
+            elif "text" in item:
+                content_parts.append(item["text"])
+            elif "content" in item:
+                content_parts.append(str(item["content"]))
+
     return "\n".join(content_parts)
 
 
@@ -376,8 +367,7 @@ def estimate_token_count(text: str, chars_per_token: float = 4.0) -> int:
     return int(len(text) / chars_per_token)
 
 
-def reconstruct_with_token_estimate(response_data: Union[str, Dict, List],
-                                    chars_per_token: float = 4.0) -> Dict[str, Any]:
+def reconstruct_with_token_estimate(response_data: Union[str, Dict, List], chars_per_token: float = 4.0) -> Dict[str, Any]:
     """
     Reconstruct LLM output and provide token estimate.
 
@@ -391,15 +381,10 @@ def reconstruct_with_token_estimate(response_data: Union[str, Dict, List],
     raw_output = reconstruct_llm_output(response_data)
     estimated_tokens = estimate_token_count(raw_output, chars_per_token)
 
-    return {
-        'raw_output': raw_output,
-        'estimated_tokens': estimated_tokens,
-        'character_count': len(raw_output)
-    }
+    return {"raw_output": raw_output, "estimated_tokens": estimated_tokens, "character_count": len(raw_output)}
 
 
-def reconstruct_input_with_token_estimate(input_message: Union[str, Dict],
-                                         chars_per_token: float = 4.0) -> Dict[str, Any]:
+def reconstruct_input_with_token_estimate(input_message: Union[str, Dict], chars_per_token: float = 4.0) -> Dict[str, Any]:
     """
     Reconstruct LLM input and provide token estimate.
 
@@ -413,11 +398,7 @@ def reconstruct_input_with_token_estimate(input_message: Union[str, Dict],
     raw_input = reconstruct_llm_input(input_message)
     estimated_tokens = estimate_token_count(raw_input, chars_per_token)
 
-    return {
-        'raw_input': raw_input,
-        'estimated_tokens': estimated_tokens,
-        'character_count': len(raw_input)
-    }
+    return {"raw_input": raw_input, "estimated_tokens": estimated_tokens, "character_count": len(raw_input)}
 
 
 # Example usage and testing
@@ -462,12 +443,9 @@ if __name__ == "__main__":
             {
                 "id": "call_123",
                 "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "arguments": '{"location": "San Francisco", "unit": "celsius"}'
-                }
+                "function": {"name": "get_weather", "arguments": '{"location": "San Francisco", "unit": "celsius"}'},
             }
-        ]
+        ],
     }
 
     result = reconstruct_with_token_estimate(mixed_response)
@@ -487,20 +465,14 @@ if __name__ == "__main__":
             {
                 "id": "call_1",
                 "type": "function",
-                "function": {
-                    "name": "search_web",
-                    "arguments": '{"query": "Python tutorials"}'
-                }
+                "function": {"name": "search_web", "arguments": '{"query": "Python tutorials"}'},
             },
             {
                 "id": "call_2",
                 "type": "function",
-                "function": {
-                    "name": "send_email",
-                    "arguments": '{"to": "user@example.com", "subject": "Search Results"}'
-                }
-            }
-        ]
+                "function": {"name": "send_email", "arguments": '{"to": "user@example.com", "subject": "Search Results"}'},
+            },
+        ],
     }
 
     result = reconstruct_with_token_estimate(multiple_tools)
@@ -521,13 +493,10 @@ if __name__ == "__main__":
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "The capital of France is Paris."
-                },
-                "finish_reason": "stop"
+                "message": {"role": "assistant", "content": "The capital of France is Paris."},
+                "finish_reason": "stop",
             }
-        ]
+        ],
     }
 
     result = reconstruct_with_token_estimate(openai_response)
@@ -571,11 +540,9 @@ if __name__ == "__main__":
 
     complex_input = {
         "role": "user",
-        "content": [
-            {"type": "tool_result", "content": "Answer questions?", "is_error": True, "tool_use_id": "tool-123"}
-        ]
+        "content": [{"type": "tool_result", "content": "Answer questions?", "is_error": True, "tool_use_id": "tool-123"}],
     }
-    
+
     result = reconstruct_input_with_token_estimate(complex_input)
     print(f"\nReconstructed Raw Input:\n{result['raw_input']}")
     print(f"\nEstimated tokens: {result['estimated_tokens']}")
@@ -601,8 +568,8 @@ if __name__ == "__main__":
         "role": "assistant",
         "parts": [
             {"type": "text", "text": "I'll check the weather for you."},
-            {"type": "tool_call", "id": "call_456", "name": "get_weather", "arguments": '{"location": "Paris"}'}
-        ]
+            {"type": "tool_call", "id": "call_456", "name": "get_weather", "arguments": '{"location": "Paris"}'},
+        ],
     }
     result = reconstruct_input_with_token_estimate(otel_parts_input)
     print(f"\nReconstructed Raw Input:\n{result['raw_input']}")

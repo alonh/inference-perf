@@ -170,7 +170,6 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
         request_data = json.dumps(payload)
 
-
         start = time.perf_counter()
         response: Optional[aiohttp.ClientResponse] = None
         response_info = None
@@ -264,7 +263,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
 
         # Record the metric
         self.client.metrics_collector.record_metric(metric)
-        
+
         # Return error if any (for load_generator to handle)
         return error
 

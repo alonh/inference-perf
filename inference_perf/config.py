@@ -99,17 +99,13 @@ class OTelTraceReplayConfig(BaseModel):
     trace_files: Optional[List[str]] = Field(None, description="List of paths to specific OTel JSON trace files")
 
     # Timing (session concurrency moved to load.stages[].concurrent_sessions)
-    session_start_delay_sec: float = Field(
-        0.0, ge=0.0, description="[DEPRECATED] Not used with graph-based traversal"
-    )
+    session_start_delay_sec: float = Field(0.0, ge=0.0, description="[DEPRECATED] Not used with graph-based traversal")
     time_scale: float = Field(
         1.0, gt=0.0, description="Time scale factor (1.0 = real-time, 0.5 = half speed, 2.0 = double speed)"
     )
 
     # Graph traversal mode
-    use_graph_traversal: bool = Field(
-        True, description="Use graph-based traversal instead of time-based sorting"
-    )
+    use_graph_traversal: bool = Field(True, description="Use graph-based traversal instead of time-based sorting")
 
     # Model configuration
     use_static_model: bool = Field(False, description="Use a single static model for all requests")
@@ -121,7 +117,7 @@ class OTelTraceReplayConfig(BaseModel):
 
     # Dependency inference
     dependency_window_ms: int = Field(120_000, gt=0, description="Time window for dependency inference (ms)")
-    
+
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(True, description="Skip invalid trace files instead of failing")
@@ -129,11 +125,13 @@ class OTelTraceReplayConfig(BaseModel):
     @model_validator(mode="after")
     def validate_static_model(self) -> "OTelTraceReplayConfig":
         # Validate that exactly one of trace_directory or trace_files is provided
-        sources_provided = sum([
-            self.trace_directory is not None,
-            self.trace_files is not None,
-        ])
-        
+        sources_provided = sum(
+            [
+                self.trace_directory is not None,
+                self.trace_files is not None,
+            ]
+        )
+
         if sources_provided == 0:
             raise ValueError("Either trace_directory or trace_files must be provided")
         if sources_provided > 1:

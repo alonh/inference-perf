@@ -65,6 +65,7 @@ import signal
 
 logger = logging.getLogger(__name__)
 
+
 class RequestQueueData(NamedTuple):
     stage_id: int
     request_data: Union[InferenceAPIData, int]
@@ -176,20 +177,20 @@ class Worker(mp.Process):
 
                         # Check if request should be skipped (e.g., session failed in OTel replay)
                         if hasattr(request_data, "skip_request") and request_data.skip_request:
-                            logger.info(f"[DEBUG] Skipping request - session failure detected: {getattr(request_data, 'node_id', 'unknown')}")
+                            logger.info(
+                                f"[DEBUG] Skipping request - session failure detected: {getattr(request_data, 'node_id', 'unknown')}"
+                            )
                             return  # Exit this task, finally block will clean up
 
                         with self.active_requests_counter.get_lock():
                             self.active_requests_counter.value += 1
                             inflight = True
-                        
+
                         error = await self.client.process_request(request_data, stage_id, request_time, lora_adapter)
 
                         # Check if this was an OTel request and if it failed (HTTP error)
                         if error is not None and hasattr(request_data, "process_failure"):
-                            exception = Exception(
-                                f"{error.error_type}: {error.error_msg}"
-                            )
+                            exception = Exception(f"{error.error_type}: {error.error_msg}")
                             await request_data.process_failure(
                                 response=None,
                                 config=self.client.api_config,
@@ -216,7 +217,9 @@ class Worker(mp.Process):
                 task = create_task(
                     schedule_client(self.request_queue, request_data, request_time, stage_id, semaphore, lora_adapter)
                 )
-                logging.debug(f"creating inference task with request data {request_data}", extra={"request_data": request_data})
+                logging.debug(
+                    f"creating inference task with request data {request_data}", extra={"request_data": request_data}
+                )
                 tasks.append(task)
                 await sleep(0)
 
@@ -371,9 +374,7 @@ class LoadGenerator:
             logger.warning(f"Stage {stage_id}: no sessions remaining in corpus, skipping")
             return
         effective_num_sessions = (
-            min(stage.num_sessions, available_sessions)
-            if stage.num_sessions is not None
-            else available_sessions
+            min(stage.num_sessions, available_sessions) if stage.num_sessions is not None else available_sessions
         )
 
         stage_start_cursor = self._session_cursor
@@ -405,9 +406,7 @@ class LoadGenerator:
             for i in range(stage_start_cursor, stage_start_cursor + effective_num_sessions)
         )
 
-        logger.info(
-            f"Total of {total_expected_requests} requests across {effective_num_sessions} sessions"
-        )
+        logger.info(f"Total of {total_expected_requests} requests across {effective_num_sessions} sessions")
 
         def should_start_next_session() -> bool:
             """Check if we should start the next session."""
@@ -581,11 +580,8 @@ class LoadGenerator:
             concurrency_level=concurrent_sessions,
         )
         logger.info(
-            "Stage %d - session-based run %s",
-            stage_id,
-            "completed" if stage_status == StageStatus.COMPLETED else "failed"
+            "Stage %d - session-based run %s", stage_id, "completed" if stage_status == StageStatus.COMPLETED else "failed"
         )
-
 
     async def run_stage(
         self,
@@ -835,15 +831,16 @@ class LoadGenerator:
 
         if self.load_type == LoadType.TRACE_SESSION_REPLAY:
             from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
+
             if isinstance(self.datagen, OTelTraceReplayDataGenerator):
                 total_sessions = self.datagen.get_session_count()
                 total_requested = sum(
-                    s.num_sessions for s in self.stages
+                    s.num_sessions
+                    for s in self.stages
                     if isinstance(s, TraceSessionReplayLoadStage) and s.num_sessions is not None
                 )
                 has_open_ended = any(
-                    isinstance(s, TraceSessionReplayLoadStage) and s.num_sessions is None
-                    for s in self.stages
+                    isinstance(s, TraceSessionReplayLoadStage) and s.num_sessions is None for s in self.stages
                 )
                 if not has_open_ended and total_requested > total_sessions:
                     raise ValueError(
@@ -919,17 +916,17 @@ class LoadGenerator:
         for stage_id, stage in enumerate(self.stages):
             if not isinstance(stage, StandardLoadStage):
                 raise TypeError(f"Non-multiprocessing run() only supports StandardLoadStage, got {type(stage)}")
-            
+
             timer = self.get_timer(stage.rate, stage.duration)
             start_time_epoch = time.time()
             start_time = time.perf_counter()
             end_time = start_time + stage.duration
             stage_status = StageStatus.RUNNING
             logger.info("Stage %d - run started", stage_id)
-            
+
             if not isinstance(self.datagen, DataGenerator):
                 raise TypeError("Non-multiprocessing run() requires DataGenerator")
-            
+
             async with TaskGroup() as tg:
                 time_generator = timer.start_timer(start_time)
                 for _, (data, time_index) in enumerate(zip(self.datagen.get_data(), time_generator, strict=True)):
