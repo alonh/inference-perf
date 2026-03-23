@@ -438,11 +438,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                             f"had different number of messages in parent node: {len(seg_msgs_from_parent)}, "
                             f"num messages in seg: {len(seg_msgs)}"
                         )
-                    for msg_idx, msg in enumerate(seg_msgs_from_parent):
+                    for msg in seg_msgs_from_parent:
                         result.append(dict(msg))
             elif seg.type == "unique":
                 # Unique message, keep as-is
-                for msg_idx, msg in enumerate(seg_msgs):
+                for msg in seg_msgs:
                     result.append(msg)
             else:
                 # Unknown segment type, keep as-is
