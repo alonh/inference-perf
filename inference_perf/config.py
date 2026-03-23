@@ -125,7 +125,6 @@ class OTelTraceReplayConfig(BaseModel):
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(True, description="Skip invalid trace files instead of failing")
-    validate_dependencies: bool = Field(False, description="Validate dependency graph and log warnings")
 
     @model_validator(mode="after")
     def validate_static_model(self) -> "OTelTraceReplayConfig":

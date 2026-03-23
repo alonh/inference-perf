@@ -18,13 +18,12 @@ data:
     dependency_window_ms: 120000
     include_errors: false
     skip_invalid_files: true
-    validate_dependencies: true
 
 load:
   type: trace_session_replay
   stages:
     - concurrent_sessions: 1  # Sequential execution
-  num_workers: 20
+  num_workers: 2
   worker_max_concurrency: 10
 
 server:

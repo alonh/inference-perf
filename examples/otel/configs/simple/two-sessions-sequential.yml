@@ -25,7 +25,6 @@ data:
     # Error handling
     include_errors: true
     skip_invalid_files: true
-    validate_dependencies: true
 
 load:
   type: trace_session_replay
