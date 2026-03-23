@@ -124,23 +124,34 @@ Token counts are read from `gen_ai.usage.prompt_tokens` / `gen_ai.usage.completi
 
 ## Architecture: how OTel replay differs from other data generators
 
-All other data generators (`random`, `shared_prefix`, `cnn_dailymail`, etc.) implement a
-simple `get_data()` iterator: the load generator calls it in a tight loop, gets one
-`InferenceAPIData` object per call, stamps it with a scheduled dispatch time, and drops it
-into the worker queue. Each request is fully independent — the load generator does not care
-what order they complete in.
+### Two generator hierarchies
 
-OTel trace replay cannot use this model because requests inside a trace are **causally
-dependent**: call B must not start until call A has finished *and* A's actual output has been
-injected into B's prompt. A flat iterator has no way to express "don't yield this item yet"
-or "substitute this message with the live output from a prior request".
+The codebase has two distinct generator hierarchies, both inheriting from `BaseGenerator`:
 
-Instead, `OTelTraceReplayDataGenerator` works at the granularity of whole *sessions* (one
-trace file = one session). It exposes a session-oriented API that replaces `get_data()`:
+1. **`DataGenerator`** — Used by all standard load types (`random`, `shared_prefix`, `cnn_dailymail`, etc.)
+   - Implements `get_data()` iterator that yields independent requests
+   - Works with `load.type: constant`, `poisson`, or `concurrent`
+   - Each request is fully independent — the load generator does not care what order they complete in
 
-**Six methods used instead of `get_data()`:**
+2. **`TraceGenerator`** — Used exclusively for trace replay
+   - Implements session-oriented methods instead of `get_data()`
+   - Works with `load.type: trace_session_replay`
+   - Requests within a session are **causally dependent**
 
-| `get_data()` equivalent | OTel session API |
+### Why TraceGenerator exists
+
+OTel trace replay cannot use the `DataGenerator` model because requests inside a trace are
+**causally dependent**: call B must not start until call A has finished *and* A's actual output
+has been injected into B's prompt. A flat `get_data()` iterator has no way to express "don't
+yield this item yet" or "substitute this message with the live output from a prior request".
+
+Instead, `OTelTraceReplayDataGenerator` inherits from `TraceGenerator` and works at the
+granularity of whole *sessions* (one trace file = one session). It exposes a session-oriented
+API:
+
+**TraceGenerator methods (replace `get_data()`):**
+
+| `DataGenerator.get_data()` equivalent | `TraceGenerator` session API |
 |---|---|
 | iterate to get next request | 1. `get_session_count()` — returns total number of sessions available<br>2. `get_session_info(idx)` — returns metadata for a specific session |
 | (implicit, iterator is ready immediately) | 3. `activate_session(session_id)` — marks root nodes as ready and arms the `NodeOutputRegistry` |
@@ -148,7 +159,11 @@ trace file = one session). It exposes a session-oriented API that replaces `get_
 | (caller assumes request is ready) | 5. `get_session_event_indices(idx)` — returns event indices for a session (helper for `get_session_events`) |
 | (caller counts finished requests) | 6. `check_session_completed(session_id)` — returns `True` when every node in the graph has finished |
 
-Note: Each `LazyLoadInferenceAPIData` item blocks in `wait_for_predecessors_and_substitute()` until predecessors have written their outputs.
+Additional session lifecycle methods: `build_session_metric()`, `record_session_metric()`,
+`get_session_metrics()`, `cleanup_session()`.
+
+Note: Each `LazyLoadInferenceAPIData` item blocks in `wait_for_predecessors_and_substitute()`
+until predecessors have written their outputs.
 
 This design means all requests for a session are enqueued immediately (so the worker pool can
 handle parallelism within the graph), but each request only *executes* once its predecessors

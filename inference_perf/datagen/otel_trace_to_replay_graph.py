@@ -38,6 +38,7 @@ Falls back to len(text) // 4 (rough chars-per-token estimate) per message.
 import argparse
 import ast
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,6 +46,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from inference_perf.datagen.otel_trace_utils import reconstruct_llm_output, reconstruct_llm_input
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,7 +87,7 @@ def estimate_tokens(text: str) -> int:
 def message_content_text(msg: Dict[str, Any]) -> str:
     """Extract the text content of a message (handles string or list content)."""
     content = msg.text
-    if isinstance(content, list): #Todo Lena: Why is this part needed?
+    if isinstance(content, list):
         parts = []
         for blk in content:
             if isinstance(blk, dict):
@@ -649,6 +652,15 @@ def build_graph(
 
         # Decompose input into message-level segments
         segments = decompose_input(rc, ancestor_calls, ancestor_node_ids)
+        
+        # Validate that segment message counts sum to total messages
+        total_segment_messages = sum(seg.message_count for seg in segments)
+        actual_message_count = len(rc.messages)
+        if total_segment_messages != actual_message_count:
+            logger.warning(
+                f"Segment validation failed for call {rc.call_id}: "
+                f"segment messages ({total_segment_messages}) != actual messages ({actual_message_count})"
+            )
 
         total_input_tokens = rc.prompt_tokens if rc.prompt_tokens is not None else sum(message_tokens(m) for m in rc.messages)
         expected_output_tokens = (

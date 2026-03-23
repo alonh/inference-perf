@@ -51,7 +51,7 @@ from aiohttp import ClientResponse
 from inference_perf.apis import ChatCompletionAPIData, InferenceAPIData, InferenceInfo, LazyLoadInferenceAPIData, SessionLifecycleMetric, ErrorResponseInfo
 from inference_perf.apis.chat import ChatMessage
 from inference_perf.config import APIConfig, APIType, DataConfig
-from inference_perf.datagen.base import DataGenerator, LazyLoadDataMixin
+from inference_perf.datagen.base import TraceGenerator, LazyLoadDataMixin
 from inference_perf.datagen.otel_trace_to_replay_graph import (
     GraphCall,
     GraphNode,
@@ -150,7 +150,7 @@ class NodeOutputRegistry:
         """
         return self._failed_sessions.get(session_id, False)
 
-    def record(self, node_id: str, output_text: str, messages=None) -> None:
+    def record(self, node_id: str, output_text: str, messages: List[Any]) -> None:
         """Register the actual output text for a completed node.
 
         Args:
@@ -420,11 +420,26 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                     result.extend(seg_msgs)
             elif seg.type == "shared":
                 seg_msgs_from_parent = self.registry.get_messages_by_node_id(seg.source_node_id)
-                logger.debug(f"Registry get for node {self.node_id} from {seg.source_node_id} shared segment from {seg.source_node_id} num messages in parent node: {len(seg_msgs_from_parent)}")
-                if len(seg_msgs_from_parent) != len(seg_msgs):
-                    logger.error(f"***************** node {self.node_id} shared segment from {seg.source_node_id} had different number of messages in parent node: {len(seg_msgs_from_parent)}, num messages in seg: {len(seg_msgs)}")
-                for msg_idx, msg in enumerate(seg_msgs_from_parent):
-                    result.append(dict(msg))
+                if seg_msgs_from_parent is None:
+                    logger.error(
+                        f"CRITICAL: Node {self.node_id} shared segment from {seg.source_node_id} "
+                        f"has no messages in registry (should not happen after wait_for_all)"
+                    )
+                    # Fallback to original messages
+                    result.extend(seg_msgs)
+                else:
+                    logger.debug(
+                        f"Registry get for node {self.node_id} from {seg.source_node_id} "
+                        f"shared segment num messages in parent node: {len(seg_msgs_from_parent)}"
+                    )
+                    if len(seg_msgs_from_parent) != len(seg_msgs):
+                        logger.error(
+                            f"Node {self.node_id} shared segment from {seg.source_node_id} "
+                            f"had different number of messages in parent node: {len(seg_msgs_from_parent)}, "
+                            f"num messages in seg: {len(seg_msgs)}"
+                        )
+                    for msg_idx, msg in enumerate(seg_msgs_from_parent):
+                        result.append(dict(msg))
             elif seg.type == "unique":
                 # Unique message, keep as-is
                 for msg_idx, msg in enumerate(seg_msgs):
@@ -620,7 +635,7 @@ class OTelTraceSession:
     start_offset_ms: int = 0  # Offset for staggered session starts
 
 
-class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
+class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     """
     Data generator that replays LLM requests from OpenTelemetry trace files.
     
@@ -773,21 +788,28 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in {trace_file}: {e}")
             return None
+        except Exception as e:
+            logger.error(f"Error reading trace file {trace_file}: {e}")
+            return None
 
         spans = data.get("spans") or []
         if not spans:
             logger.warning(f"No spans found in {trace_file}")
             return None
 
-        raw_calls = build_raw_calls(spans, include_errors=self.otel_config.include_errors)
-        if not raw_calls:
-            logger.warning(f"No LLM calls found in {trace_file}")
-            return None
+        try:
+            raw_calls = build_raw_calls(spans, include_errors=self.otel_config.include_errors)
+            if not raw_calls:
+                logger.warning(f"No LLM calls found in {trace_file}")
+                return None
 
-        graph = build_graph(
-            raw_calls,
-            source_file=str(trace_file),
-        )
+            graph = build_graph(
+                raw_calls,
+                source_file=str(trace_file),
+            )
+        except Exception as e:
+            logger.error(f"Error building graph from {trace_file}: {e}")
+            return None
 
         # Use trace_id from first call as session_id, but make it unique by adding file_index
         # to handle cases where multiple files have the same trace_id
@@ -927,14 +949,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
     def get_supported_apis(self) -> List[APIType]:
         """Return supported API types."""
         return [APIType.Chat]
-    
-    def is_io_distribution_supported(self) -> bool:
-        """IO distribution not supported for trace replay."""
-        return False
-    
-    def is_shared_prefix_supported(self) -> bool:
-        """Shared prefix not supported for trace replay."""
-        return False
     
     def get_session_count(self) -> int:
         """Return the total number of sessions (trace files) available for replay."""
@@ -1168,20 +1182,6 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
             completion_callback=self._on_node_completed,
         )
 
-    def get_data(self) -> Generator[InferenceAPIData, None, None]:
-        """OTel trace replay only works with TRACE_SESSION_REPLAY load type.
-
-        This method should never be called. If you see this error, check your config:
-        - data.type must be 'otel_trace_replay'
-        - load.type must be 'trace_session_replay'
-
-        The config validation should have caught this at startup.
-        """
-        raise NotImplementedError(
-            "OTel trace replay requires load.type='trace_session_replay'. "
-            "Cannot use with CONSTANT, POISSON, or CONCURRENT load types. "
-            "Use get_session_events() instead."
-        )
 
     def _find_event_index(self, session_id: str, node_id: str) -> int:
         """Find the event index for a given session and node_id.
@@ -1250,4 +1250,3 @@ class OTelTraceReplayDataGenerator(DataGenerator, LazyLoadDataMixin):
         logger.debug(
             f"Cleaned up session {session_id}: removed {node_count} nodes from memory"
         )
-        logger.debug(f"Recorded completion for {qualified_node_id} in shared tracker")

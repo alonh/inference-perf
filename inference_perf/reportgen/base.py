@@ -13,7 +13,10 @@
 # limitations under the License.
 import logging
 from collections import defaultdict
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from inference_perf.datagen import DataGenerator, TraceGenerator
 
 
 import numpy as np
@@ -457,7 +460,7 @@ class ReportGenerator:
         metrics_client: Optional[MetricsClient],
         metrics_collector: RequestDataCollector,
         config: "Config",
-        datagen: Optional[Any] = None,
+        datagen: Optional[Union["DataGenerator", "TraceGenerator"]] = None,
     ) -> None:
         self.metrics_collector = metrics_collector
         self.metrics_client = metrics_client
@@ -566,8 +569,8 @@ class ReportGenerator:
             lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
 
         # Session-level reports (OTel agentic workloads only)
-        from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
-        if isinstance(self.datagen, OTelTraceReplayDataGenerator) and report_config.session_lifecycle:
+        from inference_perf.datagen import TraceGenerator
+        if isinstance(self.datagen, TraceGenerator) and report_config.session_lifecycle:
             session_reports = self.generate_session_reports(
                 self.datagen.get_session_metrics(),
                 report_config.session_lifecycle,

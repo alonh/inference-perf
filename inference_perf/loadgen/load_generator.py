@@ -16,7 +16,7 @@ from inference_perf.client.metricsclient.base import StageRuntimeInfo, StageStat
 from inference_perf.utils.trace_reader import AzurePublicDatasetReader
 from inference_perf.utils.request_queue import RequestQueue
 from .load_timer import LoadTimer, ConstantLoadTimer, PoissonLoadTimer, TraceReplayLoadTimer
-from inference_perf.datagen import DataGenerator, LazyLoadDataMixin
+from inference_perf.datagen import DataGenerator, TraceGenerator, LazyLoadDataMixin
 from inference_perf.apis import InferenceAPIData
 from inference_perf.client.modelserver import ModelServerClient
 from inference_perf.circuit_breaker import get_circuit_breaker
@@ -78,7 +78,7 @@ class Worker(mp.Process):
         id: int,
         client: ModelServerClient,
         request_queue: mp.Queue,  # type: ignore[type-arg]
-        datagen: DataGenerator,
+        datagen: Union[DataGenerator, TraceGenerator],
         max_concurrency: int,
         stop_signal: SyncEvent,
         cancel_signal: SyncEvent,
@@ -251,7 +251,7 @@ class Worker(mp.Process):
 
 
 class LoadGenerator:
-    def __init__(self, datagen: DataGenerator, load_config: LoadConfig) -> None:
+    def __init__(self, datagen: Union[DataGenerator, TraceGenerator], load_config: LoadConfig) -> None:
         self.datagen = datagen
         self.stageInterval = load_config.interval
         self.load_type = load_config.type
@@ -616,14 +616,20 @@ class LoadGenerator:
         start_time = time.perf_counter() + 1
 
         if self.datagen.trace is not None:
-            num_requests = self.datagen.get_request_count()
+            if isinstance(self.datagen, DataGenerator):
+                num_requests = self.datagen.get_request_count()
+            else:
+                raise TypeError("run_stage with trace requires DataGenerator")
         else:
             num_requests = int(rate * duration)
 
         stage_status = StageStatus.RUNNING
 
         time_generator = timer.start_timer(start_time)
-        data_generator = self.datagen.get_data()
+        if isinstance(self.datagen, DataGenerator):
+            data_generator = self.datagen.get_data()
+        else:
+            raise TypeError("run_stage requires DataGenerator, use run_session_stage for TraceGenerator")
         active_workers = self.num_workers
         if concurrency_level:
             # If concurrency_level is set, some worker may get 0 concurrency, then we should re-evaluate workers we can assign reqeusts to.
@@ -911,12 +917,19 @@ class LoadGenerator:
             return await self.mp_run(client)
 
         for stage_id, stage in enumerate(self.stages):
+            if not isinstance(stage, StandardLoadStage):
+                raise TypeError(f"Non-multiprocessing run() only supports StandardLoadStage, got {type(stage)}")
+            
             timer = self.get_timer(stage.rate, stage.duration)
             start_time_epoch = time.time()
             start_time = time.perf_counter()
             end_time = start_time + stage.duration
             stage_status = StageStatus.RUNNING
             logger.info("Stage %d - run started", stage_id)
+            
+            if not isinstance(self.datagen, DataGenerator):
+                raise TypeError("Non-multiprocessing run() requires DataGenerator")
+            
             async with TaskGroup() as tg:
                 time_generator = timer.start_timer(start_time)
                 for _, (data, time_index) in enumerate(zip(self.datagen.get_data(), time_generator, strict=True)):
