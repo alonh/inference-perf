@@ -132,8 +132,8 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except Exception:
-            raise ValueError(f"Failed to parse messages JSON: {raw}")
+        except Exception as err:
+            raise ValueError(f"Failed to parse messages JSON: {raw}") from err
 
     if isinstance(raw, list):
         for x in raw:
@@ -178,8 +178,8 @@ def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
             if len(msgs) > 1:
                 raise ValueError(f"Unexpected output messages fromat: expected a single message, got {len(msgs)} messages")
             return ComplexOtelMessage(role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_output(msgs[0]))
-        except Exception:
-            raise ValueError(f"Failed parsing {out}")
+        except Exception as err:
+            raise ValueError(f"Failed parsing {out}") from err
     if isinstance(out, list) and out:
         return OtelMessage(role="assistant", text=message_content_text(out[-1]))
     return None
