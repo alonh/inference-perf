@@ -198,24 +198,6 @@ class TraceGenerator(BaseGenerator):
         raise NotImplementedError
 
     @abstractmethod
-    def record_session_metric(self, metric: Any) -> None:
-        """Record a completed session's lifecycle metric.
-
-        Args:
-            metric: SessionLifecycleMetric to record
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_session_metrics(self) -> List[Any]:
-        """Return all recorded session lifecycle metrics.
-
-        Returns:
-            List of SessionLifecycleMetric objects
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def cleanup_session(self, session_id: str) -> None:
         """Clean up memory for a completed session.
 

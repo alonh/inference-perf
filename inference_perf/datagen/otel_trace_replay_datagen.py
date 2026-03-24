@@ -698,9 +698,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         else:
             self._shared_node_completions = {}
 
-        # Accumulated session-level metrics (populated by LoadGen at session completion)
-        self._session_metrics: List[SessionLifecycleMetric] = []
-
         # Load and process all OTel trace files
         self.sessions: List[OTelTraceSession] = []
         self._load_trace_files()
@@ -988,14 +985,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         """
         event_indices = self.get_session_event_indices(session_index)
         return [LazyLoadInferenceAPIData(data_index=idx) for idx in event_indices]
-
-    def record_session_metric(self, metric: SessionLifecycleMetric) -> None:
-        """Record a completed session's lifecycle metric."""
-        self._session_metrics.append(metric)
-
-    def get_session_metrics(self) -> List[SessionLifecycleMetric]:
-        """Return all recorded session lifecycle metrics."""
-        return self._session_metrics
 
     def build_session_metric(
         self,

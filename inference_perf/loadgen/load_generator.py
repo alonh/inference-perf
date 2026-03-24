@@ -20,6 +20,7 @@ from inference_perf.datagen import DataGenerator, TraceGenerator, LazyLoadDataMi
 from inference_perf.apis import InferenceAPIData
 from inference_perf.client.modelserver import ModelServerClient
 from inference_perf.circuit_breaker import get_circuit_breaker
+from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.config import (
     LoadConfig,
     LoadType,
@@ -254,7 +255,12 @@ class Worker(mp.Process):
 
 
 class LoadGenerator:
-    def __init__(self, datagen: Union[DataGenerator, TraceGenerator], load_config: LoadConfig) -> None:
+    def __init__(
+        self,
+        datagen: Union[DataGenerator, TraceGenerator],
+        load_config: LoadConfig,
+        session_metrics_collector: Optional[SessionMetricsCollector] = None,
+    ) -> None:
         self.datagen = datagen
         self.stageInterval = load_config.interval
         self.load_type = load_config.type
@@ -266,6 +272,7 @@ class LoadGenerator:
         self.circuit_breakers = [get_circuit_breaker(breaker_name) for breaker_name in load_config.circuit_breakers]
         self.sweep_config = load_config.sweep
         self.interrupt_sig = False
+        self.session_metrics_collector = session_metrics_collector
         signal.signal(signal.SIGINT, self._sigint_handler)
         if self.load_type == LoadType.TRACE_REPLAY:
             self.trace = load_config.trace
@@ -527,7 +534,10 @@ class LoadGenerator:
                         start_time=session_dispatch_times.get(session_id, start_time_epoch),
                         end_time=time.time(),
                     )
-                    self.datagen.record_session_metric(session_metric)
+
+                    # Record in collector instead of datagen
+                    if self.session_metrics_collector:
+                        self.session_metrics_collector.record_metric(session_metric)
 
                     # Clean up completed session data to prevent memory leaks
                     self.datagen.cleanup_session(session_id)

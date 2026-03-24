@@ -18,6 +18,7 @@ from inference_perf.analysis.analyze import analyze_reports
 from typing import List, Optional, Union
 from inference_perf.client.modelserver.tgi_client import TGImodelServerClient
 from inference_perf.loadgen import LoadGenerator
+from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.config import (
     DataGenType,
     LoadType,
@@ -328,13 +329,16 @@ def main_cli() -> None:
     else:
         raise Exception("data config missing")
 
-    # Define LoadGenerator
+    # Create session metrics collector for agentic workflows
+    session_metrics_collector = SessionMetricsCollector()
+
+    # Define LoadGenerator with session metrics collector
     if isinstance(metrics_client, PrometheusMetricsClient) and config.report.prometheus and config.report.prometheus.per_stage:
         config.load.interval = max(config.load.interval, metrics_client.scrape_interval)
-    loadgen = LoadGenerator(datagen, config.load)
+    loadgen = LoadGenerator(datagen, config.load, session_metrics_collector)
 
-    # Wire datagen into reportgen for session-level reporting
-    reportgen.datagen = datagen
+    # Wire session metrics collector into reportgen (instead of datagen)
+    reportgen.session_metrics_collector = session_metrics_collector
 
     # Setup Perf Test Runner
     perfrunner = InferencePerfRunner(model_server_client, loadgen, reportgen, storage_clients)

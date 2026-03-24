@@ -28,6 +28,7 @@ from inference_perf.client.metricsclient.base import ModelServerMetrics
 from inference_perf.client.metricsclient.prometheus_client import PrometheusMetricsClient
 from inference_perf.client.requestdatacollector import RequestDataCollector
 from inference_perf.config import Config, PrometheusMetricsReportConfig, ReportConfig, SessionLifecycleReportConfig
+from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.utils import ReportFile
 
 logger = logging.getLogger(__name__)
@@ -466,6 +467,7 @@ class ReportGenerator:
         self.metrics_client = metrics_client
         self.config = config
         self.datagen = datagen
+        self.session_metrics_collector: Optional[SessionMetricsCollector] = None
 
     def get_metrics_collector(self) -> RequestDataCollector:
         """
@@ -569,11 +571,9 @@ class ReportGenerator:
             lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
 
         # Session-level reports (OTel agentic workloads only)
-        from inference_perf.datagen import TraceGenerator
-
-        if isinstance(self.datagen, TraceGenerator) and report_config.session_lifecycle:
+        if self.session_metrics_collector and report_config.session_lifecycle:
             session_reports = self.generate_session_reports(
-                self.datagen.get_session_metrics(),
+                self.session_metrics_collector.get_metrics(),
                 report_config.session_lifecycle,
                 percentiles,
             )
