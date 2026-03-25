@@ -44,7 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from inference_perf.datagen.otel_trace_utils import reconstruct_llm_output, reconstruct_llm_input
+from inference_perf.datagen.otel_trace_utils import reconstruct_llm_output, reconstruct_llm_input,  \
+    reconstruct_each_part_in_message_info
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,52 @@ def output_matches_message(output_text: str, msg: Dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _convert_content_and_tool_calls_to_parts(message: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert a message with both 'content' and 'tool_calls' fields into parts format.
+
+    Transforms:
+        {"role": "assistant", "content": "text", "tool_calls": [...]}
+    Into:
+        {"role": "assistant", "parts": [{"type": "text", "content": "text"}, {"type": "tool_call", ...}]}
+    """
+    parts = []
+
+    # Add content as a text part if present
+    content = message.get('content')
+    if content:
+        if isinstance(content, str):
+            parts.append({"type": "text", "content": content})
+        elif isinstance(content, list):
+            # Content is already a list of parts
+            parts.extend(content)
+
+    # Add tool_calls as tool_call parts
+    tool_calls = message.get('tool_calls', [])
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            # OpenAI format: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
+            if 'function' in tc:
+                parts.append({
+                    "type": "tool_call",
+                    "id": tc.get('id'),
+                    "name": tc['function'].get('name'),
+                    "arguments": tc['function'].get('arguments')
+                })
+            # Direct format: {"name": "...", "arguments": "..."}
+            elif 'name' in tc:
+                parts.append({
+                    "type": "tool_call",
+                    "id": tc.get('id'),
+                    "name": tc.get('name'),
+                    "arguments": tc.get('arguments')
+                })
+
+    # Create new message with parts
+    result = {"role": message.get('role', 'assistant'), "parts": parts}
+    return result
+
+
 def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract messages from span attributes. Returns empty list if not found."""
     attrs = span.get("attributes") or {}
@@ -141,7 +188,12 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
             role = x["role"]
             if "content" in x:
                 content = x["content"]
-                if isinstance(content, str):
+                # Check if message also has tool_calls - convert to parts format
+                if "tool_calls" in x:
+                    # Transform message with content + tool_calls into parts format
+                    message_with_parts = _convert_content_and_tool_calls_to_parts(x)
+                    res.append(ComplexOtelMessage(role=role, message_info=message_with_parts, raw_reconstructed_text=reconstruct_llm_input(message_with_parts)))
+                elif isinstance(content, str):
                     res.append(OtelMessage(role=role, text=content))
                 else:
                     res.append(ComplexOtelMessage(role=role, message_info=x, raw_reconstructed_text=reconstruct_llm_input(x)))
@@ -176,9 +228,7 @@ def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
             msgs = json.loads(out)
             if len(msgs) > 1:
                 raise ValueError(f"Unexpected output messages fromat: expected a single message, got {len(msgs)} messages")
-            return ComplexOtelMessage(
-                role="assistant", message_info=msgs[0], raw_reconstructed_text=reconstruct_llm_output(msgs[0])
-            )
+            return ComplexOtelMessage(role="assistant", message_info=reconstruct_each_part_in_message_info(msgs[0]), raw_reconstructed_text=reconstruct_llm_output(msgs[0]))
         except Exception as err:
             raise ValueError(f"Failed parsing {out}") from err
     if isinstance(out, list) and out:
@@ -241,7 +291,7 @@ def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     seen_signatures: Set[str] = set()
     unique_spans: List[Dict[str, Any]] = []
-
+    spans.sort(key=lambda s: s['span_id']) #to make filtering consistant between runs
     for span in spans:
         # Create a signature for the span based on start_time, end_time, and attributes
         start_time = span.get("start_time", "")
@@ -318,7 +368,6 @@ def build_raw_calls(spans: List[Dict[str, Any]], include_errors: bool = False) -
 # Causal dependency detection (message-level)
 # ---------------------------------------------------------------------------
 
-
 def is_causal_dep(a: RawCall, b: RawCall) -> bool:
     """Return True if call B causally depends on call A.
 
@@ -328,10 +377,37 @@ def is_causal_dep(a: RawCall, b: RawCall) -> bool:
     """
     if not a.out_message or not b.messages:
         return False
+    #match entire output message:
     a_out = norm_text(a.out_message.text)
     for msg in b.messages:
         if output_matches_message(a_out, msg):
             return True
+    #try matching parts
+    if isinstance(a.out_message, ComplexOtelMessage) and "parts" in a.out_message.message_info and len(a.out_message.message_info["parts"]) > 1:
+        #this means this output message contains several part, and will be interpreted as more than one message in the calls history
+        first_part_match_candidates = []
+        first_part_text = a.out_message.message_info["parts_text"][0]
+        for i in range(len(b.messages)):
+            if output_matches_message(first_part_text, b.messages[i]):
+                first_part_match_candidates.append(i)
+        for candidate_i in first_part_match_candidates:
+            candidate_ok = True
+            #in case of a tool call, we'll see first the tool call, and then the result of the execution.
+            offset = 1 if a.out_message.message_info["parts"][0]["type"] != "tool_call" else 2
+            for part, part_text in zip(a.out_message.message_info["parts"][1:], a.out_message.message_info["parts_text"][1:]):
+                #part_text is the text that would appear in the input messages list. we also need part to determine the type, to set the offset
+                next_index_to_check = candidate_i + offset
+                if next_index_to_check >= len(b.messages):
+                    candidate_ok = False
+                    break
+                if not output_matches_message(part_text, b.messages[next_index_to_check]):
+                    candidate_ok = False
+                    break
+                else:
+                    offset = 1 if part["type"] != "tool_call" else 2
+            if candidate_ok:
+                return True
+        return False
     return False
 
 
@@ -527,6 +603,7 @@ class GraphNode:
     node_id: str
     call: GraphCall
     predecessor_node_ids: List[str]  # all nodes that must complete before this one starts
+    causal_predecessor_ids: List[str]  # subset of predecessor_node_ids that are causal dependencies - this is stored only for visualization purpose
     wait_ms: int  # delay after last predecessor finishes (ms)
     # Timing info (informational, from original trace)
     t_start_ms: int
@@ -578,21 +655,20 @@ def build_graph(
     predecessor_indices: List[List[int]] = [[] for _ in range(n)]
     # is_causal_edge[i] = True if predecessor_indices[i] was derived from causal deps
     #                      False if it was a timing-fallback assignment
-    is_causal_edge: List[bool] = [False] * n
+    causal_preds: List[List[int]] = [[] for _ in range(n)] # the list of all causal predecessors per node
 
     def is_causal_ancestor(ancestor: int, descendant: int) -> bool:
         """Return True if ancestor is a (transitive) predecessor of descendant
         following only causal edges (not timing-fallback edges)."""
         visited: Set[int] = set()
-        stack = list(predecessor_indices[descendant]) if is_causal_edge[descendant] else []
+        stack = list(causal_preds[descendant])
         while stack:
             node = stack.pop()
             if node == ancestor:
                 return True
             if node not in visited:
                 visited.add(node)
-                if is_causal_edge[node]:
-                    stack.extend(predecessor_indices[node])
+                stack.extend(causal_preds[node])
         return False
 
     def is_valid_predecessor(predecessor_candidate, curr_call):
@@ -605,27 +681,33 @@ def build_graph(
 
     for i in range(1, n):
         # Collect all calls that causally feed call i
-        causal_preds: List[int] = []
+        curr_causal_preds: List[int] = []
         for j in range(i - 1, -1, -1):
             if is_causal_dep(calls[j], calls[i]):
-                causal_preds.append(j)
+                curr_causal_preds.append(j)
 
-        if causal_preds:
+        if curr_causal_preds:
             # Transitive reduction: remove j if it's already a causal ancestor of another
             # causal pred k. Only traverse causal edges — timing-fallback edges do not
             # create transitive relationships that should suppress direct causal deps.
-            direct_preds = [j for j in causal_preds if not any(is_causal_ancestor(j, k) for k in causal_preds if k != j)]
+            direct_preds = [j for j in curr_causal_preds if not any(is_causal_ancestor(j, k) for k in curr_causal_preds if k != j)]
             predecessor_indices[i] = direct_preds
-            is_causal_edge[i] = True
-        else:
-            predecessor_index = 0  # default value - the predecessor is the first node
-            # No causal predecessor — look for the closest possible predecessor. It's not necessaritly the immediate predecessor, as they can be executed in parallel
-            for j in range(i - 1, -1, -1):
-                if is_valid_predecessor(calls[j], calls[i]):
-                    predecessor_index = j
-                    break
-            predecessor_indices[i] = [predecessor_index]
-            is_causal_edge[i] = False
+            causal_preds[i].extend(predecessor_indices[i])
+
+        """
+        Always add a temporal fallback predecessor (the closest non-overlapping node).
+        This ensures we don't have long wait times when causal predecessors are distant.
+        Causal detection (output matching) doesn't catch all dependencies, so we use
+        temporal proximity as a conservative fallback to maintain realistic timing.
+        """
+        predecessor_index = 0 #default value - the predecessor is the first node
+        # look for the closest possible predecessor. It's not necessaritly the immediate predecessor, as they can be executed in parallel
+        for j in range(i-1, -1, -1):
+            if is_valid_predecessor(calls[j], calls[i]):
+                predecessor_index = j
+                break
+        if predecessor_index not in predecessor_indices[i]: #we may have already added this node as a causal predecessor.
+            predecessor_indices[i].append(predecessor_index)
 
     # ---------------------------------------------------------------------------
     # Step 2: Compute all ancestors per call (for segment decomposition)
@@ -696,6 +778,7 @@ def build_graph(
             node_id=nid,
             call=graph_call,
             predecessor_node_ids=[node_ids[j] for j in pred_idxs],
+            causal_predecessor_ids=[node_ids[j] for j in causal_preds[i]],
             wait_ms=wait_ms,
             t_start_ms=rc.t_start_ms,
             t_end_ms=rc.t_end_ms,
@@ -742,6 +825,7 @@ def graph_node_to_dict(node: GraphNode) -> Dict[str, Any]:
         "t_start_ms": node.t_start_ms,
         "t_end_ms": node.t_end_ms,
         "predecessor_node_ids": node.predecessor_node_ids,
+        "causal_predecessor_ids": node.causal_predecessor_ids,
         "wait_ms": node.wait_ms,
         "call": graph_call_to_dict(node.call),
     }

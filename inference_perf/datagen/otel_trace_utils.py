@@ -209,6 +209,18 @@ def _format_tool_call(tool_call: Dict) -> str:
     return f"<|tool_call|>{function_name}<|tool_args|>{arguments}<|end|>"
 
 
+def reconstruct_each_part_in_message_info(message_info):
+    #towards matching output messages with input messages, transform each part to a stand alone text message
+    message_info["parts_text"] = []
+    if "parts" not in message_info:
+        return message_info
+    for part in message_info["parts"]:
+        if part["type"] == "tool_call":
+            message_info["parts_text"].append(_format_tool_call(part))
+        else:
+            message_info["parts_text"].append(part["content"])
+    return message_info
+
 def reconstruct_llm_input(input_message: Union[str, Dict]) -> str:
     """
     Reconstruct the raw LLM input from a single parsed message structure.
