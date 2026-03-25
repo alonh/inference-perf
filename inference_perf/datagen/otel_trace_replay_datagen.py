@@ -35,6 +35,24 @@ the same worker process.
 
 The actual output is captured in `OTelChatCompletionAPIData.process_response`, which overrides
 the base `ChatCompletionAPIData.process_response` to register the output after each LLM call.
+
+Cross-process state
+-------------------
+Two orthogonal coordination problems exist in this system:
+
+  Problem A — intra-worker, between coroutines on the same event loop:
+    A node waits for its predecessor's output before building its request.
+    Handled by NodeOutputRegistry using plain dicts and asyncio.Event.
+    No IPC involved; session-to-worker affinity makes cross-process sharing unnecessary.
+
+  Problem B — cross-process, worker → main process:
+    The main process drives the session pool loop and needs to know when sessions
+    complete and whether they failed. Workers produce these facts.
+    Handled by SessionSharedState using Manager.dict() for both signals.
+
+OTelChatCompletionAPIData holds refs to both objects and uses each for its
+appropriate purpose. SessionSharedState is the single place where Manager.dict()
+instances are created and owned.
 """
 
 import asyncio
@@ -45,7 +63,7 @@ import time
 from dataclasses import dataclass, field, replace as dc_replace
 from multiprocessing.managers import SyncManager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from aiohttp import ClientResponse
 
@@ -109,64 +127,95 @@ class OTelInferenceInfo(InferenceInfo):
 
 
 # ---------------------------------------------------------------------------
-# NodeOutputRegistry — per-worker output and message store
+# SessionSharedState — all cross-process state in one place
+# ---------------------------------------------------------------------------
+
+
+class SessionSharedState:
+    """Owns all state that must cross the worker → main-process boundary.
+
+    Two facts need to be visible to the main process while workers are running:
+      1. Which nodes have completed (so the main process can detect session completion).
+      2. Which sessions have failed (so workers can skip dependent nodes and the
+         main process can retire failed sessions).
+
+    Both are stored in Manager.dict() instances so writes on any worker are
+    immediately visible to every other process. This is the *only* place in the
+    OTel replay path where Manager proxies are created.
+
+    Usage:
+        shared = SessionSharedState(mp_manager)   # main process, before fork
+        # workers call shared.record_node_completed() and shared.mark_session_failed()
+        # main process calls shared.is_node_completed() and shared.is_session_failed()
+    """
+
+    def __init__(self, manager: Optional[SyncManager] = None) -> None:
+        if manager is not None:
+            self._node_completions: Dict[str, float] = manager.dict()  # type: ignore[assignment]
+            self._failed_sessions: Dict[str, bool] = manager.dict()  # type: ignore[assignment]
+        else:
+            self._node_completions = {}
+            self._failed_sessions = {}
+
+    # -- node completion --
+
+    def record_node_completed(self, qualified_node_id: str, completion_time: float) -> None:
+        """Record that a node has completed. Called from worker processes."""
+        self._node_completions[qualified_node_id] = completion_time
+        logger.debug(f"Recorded completion for node {qualified_node_id}")
+
+    def is_node_completed(self, qualified_node_id: str) -> bool:
+        """Return True if the node has been recorded as completed."""
+        return qualified_node_id in self._node_completions
+
+    def get_node_completion_time(self, qualified_node_id: str) -> Optional[float]:
+        """Return completion timestamp for a node, or None if not yet completed."""
+        return self._node_completions.get(qualified_node_id)
+
+    # -- session failure --
+
+    def mark_session_failed(self, session_id: str) -> None:
+        """Mark a session as failed. Called from worker processes."""
+        self._failed_sessions[session_id] = True
+        logger.debug(f"Marked session {session_id} as failed")
+
+    def is_session_failed(self, session_id: str) -> bool:
+        """Return True if the session has been marked as failed."""
+        return self._failed_sessions.get(session_id, False)
+
+
+# ---------------------------------------------------------------------------
+# NodeOutputRegistry — intra-worker output and message store
 # ---------------------------------------------------------------------------
 
 
 class NodeOutputRegistry:
     """Per-worker registry mapping node_id → actual output text and input messages.
 
-    All data is stored in plain in-process dicts. There is no Manager proxy for
-    output or messages — session-to-worker affinity guarantees that the node that
-    writes an output and the nodes that read it always run on the same worker process,
-    so cross-process sharing is not needed.
+    All data is stored in plain in-process dicts. Session-to-worker affinity
+    guarantees that the node writing an output and the nodes reading it always
+    run on the same worker process, so no IPC is needed here.
 
-    The only cross-process state is _failed_sessions, which is written by workers and
-    read by the main process to detect cascading failures.
+    Async waiting between coroutines on the same event loop is handled via
+    asyncio.Event — one per node, allocated on first demand.
+
+    This class has no Manager dependency. All cross-process state lives in
+    SessionSharedState.
 
     Usage:
-        registry = NodeOutputRegistry(manager)
+        registry = NodeOutputRegistry()
         # workers call registry.record(node_id, text, messages) after each LLM call
         # dependent nodes call await registry.require_async(node_id) before dispatching
     """
 
-    def __init__(self, manager: Optional[SyncManager] = None) -> None:
+    def __init__(self) -> None:
         # Output text and input messages: plain dicts, same-worker only.
-        # Session-to-worker affinity guarantees that the node writing an output
-        # and the nodes reading it always run on the same worker process.
         self._node_output_text: Dict[str, str] = {}
         self._node_input_messages: Dict[str, Any] = {}
-
-        # Failed sessions must be visible to the main process (which polls
-        # check_session_completed) and to all workers (which check before waiting).
-        if manager is not None:
-            self._failed_sessions: Dict[str, bool] = manager.dict()  # type: ignore[assignment]
-        else:
-            self._failed_sessions = {}
 
         # One asyncio.Event per node. Only accessed from coroutines on this
         # worker's single event loop; no lock needed.
         self._node_events: Dict[str, asyncio.Event] = {}
-
-    def mark_session_failed(self, session_id: str) -> None:
-        """Mark a session as failed.
-
-        Args:
-            session_id: The session ID to mark as failed
-        """
-        self._failed_sessions[session_id] = True
-        logger.debug(f"Marked session {session_id} as failed")
-
-    def is_session_failed(self, session_id: str) -> bool:
-        """Check if a session has been marked as failed.
-
-        Args:
-            session_id: The session ID to check
-
-        Returns:
-            True if the session has been marked as failed, False otherwise
-        """
-        return self._failed_sessions.get(session_id, False)
 
     def record(self, node_id: str, output_text: str, messages: List[Any]) -> None:
         """Register output for a completed node and wake any async waiters."""
@@ -268,7 +317,8 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     3. Return OTelInferenceInfo (InferenceInfo subclass) with output_text populated.
 
     The registry and node_id are passed at construction time via Pydantic fields.
-    arbitrary_types_allowed is required because NodeOutputRegistry is not a Pydantic model.
+    arbitrary_types_allowed is required because NodeOutputRegistry and
+    SessionSharedState are not Pydantic models.
 
     Dependency handling:
     - predecessor_node_ids: List of nodes that must complete before this one
@@ -281,6 +331,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
     node_id: str
     registry: NodeOutputRegistry
+    shared_state: SessionSharedState
 
     # Dependency information for async waiting
     predecessor_node_ids: List[str] = field(default_factory=list)
@@ -288,9 +339,6 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     input_segments: List[InputSegment] = field(default_factory=list)
     original_messages: List[Dict[str, Any]] = field(default_factory=list)
     expected_output_content: Optional[str] = None
-
-    # Completion callback for graph traversal
-    completion_callback: Optional[Callable[[str, float], None]] = None
 
     # Flag to skip HTTP request (set when session fails)
     skip_request: bool = False
@@ -309,12 +357,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         session_id = self.node_id.split(":")[0] if ":" in self.node_id else self.node_id
 
         # Pre-wait check: if session already failed, skip immediately.
-        if self.registry.is_session_failed(session_id):
+        if self.shared_state.is_session_failed(session_id):
             logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (pre-wait check)")
             self.skip_request = True
             self.registry.record(self.node_id, "", self.messages)
-            if self.completion_callback:
-                self.completion_callback(self.node_id, time.perf_counter())
+            self.shared_state.record_node_completed(self.node_id, time.perf_counter())
             return
 
         if self.predecessor_node_ids:
@@ -330,12 +377,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             logger.debug(f"Node {self.node_id} all predecessors done")
 
             # Post-wait check: a predecessor may have failed while we were waiting.
-            if self.registry.is_session_failed(session_id):
+            if self.shared_state.is_session_failed(session_id):
                 logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (post-wait check)")
                 self.skip_request = True
                 self.registry.record(self.node_id, "", self.messages)
-                if self.completion_callback:
-                    self.completion_callback(self.node_id, time.perf_counter())
+                self.shared_state.record_node_completed(self.node_id, time.perf_counter())
                 return
 
         # Wait additional delay specified in wait_ms
@@ -435,12 +481,8 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         logger.debug(
             f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output: {output_text}"
         )
-        if self.completion_callback:
-            logger.debug(f"Calling completion callback for node {self.node_id}")
-            self.completion_callback(self.node_id, time.perf_counter())
-            logger.debug(f"Completion callback finished for node {self.node_id}")
-        else:
-            logger.warning(f"No completion callback set for node {self.node_id}")
+        self.shared_state.record_node_completed(self.node_id, time.perf_counter())
+        logger.debug(f"Recorded node completion in shared state for {self.node_id}")
 
     async def process_response(
         self,
@@ -548,7 +590,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         session_id = self.node_id.split(":")[0] if ":" in self.node_id else self.node_id
 
         # Mark the entire session as failed to prevent other nodes from processing
-        self.registry.mark_session_failed(session_id)
+        self.shared_state.mark_session_failed(session_id)
 
         # Create empty inference info
         empty_info = OTelInferenceInfo(
@@ -664,17 +706,12 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         else:
             raise ValueError("Either trace_directory or trace_files must be provided in otel_trace_replay config")
 
-        # Output registry: per-worker plain dicts.
-        # If mp_manager is None (single-process mode), _failed_sessions falls back to a plain dict.
-        self.output_registry = NodeOutputRegistry(manager=mp_manager)
+        # Cross-process state: node completions and session failures.
+        # This is the only place Manager.dict() instances are created.
+        self.shared_state = SessionSharedState(mp_manager)
 
-        # Shared session-node completion tracker.
-        # Maps qualified_node_id -> completion_time. Shared via Manager so the
-        # main process can read completions recorded by worker processes.
-        if mp_manager is not None:
-            self._shared_node_completions: Dict[str, float] = mp_manager.dict()  # type: ignore[assignment]
-        else:
-            self._shared_node_completions = {}
+        # Intra-worker output registry: plain dicts + asyncio.Event, no IPC.
+        self.output_registry = NodeOutputRegistry()
 
         # Load and process all OTel trace files
         self.sessions: List[OTelTraceSession] = []
@@ -1103,10 +1140,10 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         # Check completion tracker for all nodes in this session
         for node_id in state.graph.nodes.keys():
             qualified_node_id = f"{session_id}:{node_id}"
-            if qualified_node_id in self._shared_node_completions:
+            if self.shared_state.is_node_completed(qualified_node_id):
                 # Record in local state if not already recorded
                 if node_id not in state.completed_nodes:
-                    completion_time = self._shared_node_completions[qualified_node_id]
+                    completion_time = self.shared_state.get_node_completion_time(qualified_node_id)
                     state.completed_nodes.add(node_id)
                     state.node_completion_times[node_id] = completion_time
 
@@ -1168,14 +1205,13 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             max_tokens=max_tokens,
             node_id=event.node_id,
             registry=self.output_registry,
+            shared_state=self.shared_state,
             # Pass dependency info for the worker to use during async waiting
             predecessor_node_ids=event.predecessor_node_ids,
             wait_ms=event.wait_ms,
             input_segments=event.input_segments,
             original_messages=event.messages,
-            expected_output_content=event.expected_output,  # expected_output_content,
-            # Pass completion callback for graph traversal
-            completion_callback=self._on_node_completed,
+            expected_output_content=event.expected_output,
         )
 
     def _find_event_index(self, session_id: str, node_id: str) -> int:
@@ -1195,18 +1231,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         )
 
     # Made with Bob
-
-    def _on_node_completed(self, qualified_node_id: str, completion_time: float) -> None:
-        """Called when a node completes. Records completion in shared state.
-
-        This is called from worker processes, so we only update the shared
-        completion tracker (_shared_node_completions). The main process will
-        check this tracker and manage session activation/completion.
-        """
-        logger.debug(f"_on_node_completed called for {qualified_node_id}")
-
-        # Record completion in shared dict (visible across all processes)
-        self._shared_node_completions[qualified_node_id] = completion_time
 
     def cleanup_session(self, session_id: str) -> None:
         """Clean up memory for a completed session.
@@ -1236,8 +1260,9 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             self.output_registry._node_input_messages.pop(qualified_node_id, None)
             self.output_registry._node_events.pop(qualified_node_id, None)
 
-            # Remove from shared completion tracker. we might use this to track the completion of the session when generating reports, do not pop yet
-            # self._shared_node_completions.pop(qualified_node_id, None)
+            # Remove from shared completion tracker.
+            # We retain completion times for report generation; uncomment to reclaim memory.
+            # self.shared_state._node_completions.pop(qualified_node_id, None)
 
         # Remove session state
         del self.session_graph_state[session_id]
