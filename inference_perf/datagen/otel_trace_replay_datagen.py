@@ -56,6 +56,7 @@ instances are created and owned.
 """
 
 import asyncio
+import glob
 import json
 import logging
 import random
@@ -644,6 +645,50 @@ class OTelTraceSession:
     graph: ReplayGraph
     start_offset_ms: int = 0  # Offset for staggered session starts
 
+def resolve_trace_files(trace_files):
+    """
+    Extract all relevant files from a list of paths.
+
+    Handles two types of paths:
+    1. Full path to a Otel file: /path/to/file.json
+    2. Wildcard pattern: /path/to/*.json
+
+    Args:
+        trace_files: List of file paths or wildcard patterns
+
+    Returns:
+        List of resolved file paths (duplicates removed, sorted)
+
+    Example:
+        >>> paths = [
+        ...     "/data/config.json",
+        ...     "/logs/*.json",
+        ...     "/output/**/*.json"  # recursive pattern
+        ... ]
+        >>> files = resolve_trace_files(paths)
+    """
+    all_files = set()  # Use set to avoid duplicates
+
+    for path_pattern in trace_files:
+        # Check if path contains wildcard characters
+        if '*' in path_pattern or '?' in path_pattern:
+            # Use glob to expand the pattern
+            # recursive=True enables ** pattern for recursive matching
+            matched_files = glob.glob(path_pattern, recursive=True)
+
+            # Filter to only include files (not directories)
+            for matched in matched_files:
+                if Path(matched).is_file():
+                    all_files.add(matched)
+        else:
+            # Direct path - check if file exists
+            if Path(path_pattern).is_file():
+                all_files.add(path_pattern)
+            else:
+                print(f"Warning: File not found: {path_pattern}")
+
+    # Convert to sorted list for consistent output
+    return [Path(f) for f in all_files]
 
 class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     """
@@ -691,7 +736,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                 raise ValueError(f"Trace directory path is not a directory: {self.trace_dir}")
         elif self.otel_config.trace_files:
             # Multiple files mode
-            self.trace_files_list = [Path(f) for f in self.otel_config.trace_files]
+            self.trace_files_list = resolve_trace_files(self.otel_config.trace_files)
             self.load_mode = "files_list"
             self.trace_dir = None  # Not needed for files_list mode
 

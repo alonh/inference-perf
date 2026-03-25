@@ -83,6 +83,7 @@ data:
       - "path/to/trace1.json"
       - "path/to/trace2.json"
       - "path/to/trace3.json"
+      - "path/to/some/*/*.json"                   # you can specify a pattern that matches several files.
     trace_directory: "path/to/traces/"            # OR: all .json files in dir
 
     # Model
