@@ -351,6 +351,10 @@ def main_cli() -> None:
     end_time = time.time()
     duration = end_time - start_time  # Calculate the duration of the test
 
+    # Enrich session metrics before generating reports
+    if session_metrics_collector:
+        session_metrics_collector.enrich_metrics(reportgen.metrics_collector.get_metrics())
+
     # Generate Reports after the tests
     reports = perfrunner.generate_reports(
         report_config=config.report,

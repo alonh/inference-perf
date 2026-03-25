@@ -615,31 +615,15 @@ class ReportGenerator:
         report_config: SessionLifecycleReportConfig,
         percentiles: List[float],
     ) -> List[ReportFile]:
-        """Generate session-level lifecycle reports."""
+        """Generate session-level lifecycle reports.
+        
+        Note: Session metrics should be enriched (via SessionMetricsCollector.enrich_metrics())
+        before calling this method.
+        """
         reports: List[ReportFile] = []
 
         if not session_metrics:
             return reports
-
-        # Enrich session metrics with token totals and error/success now that
-        # the collector is fully populated (multiprocess collector only has
-        # data after the run completes).
-        request_metrics = self.metrics_collector.get_metrics()
-        token_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
-        error_by_session: dict[str, Optional[Any]] = {}
-        for m in request_metrics:
-            if m.session_id:
-                inp, out = token_by_session[m.session_id]
-                token_by_session[m.session_id] = (inp + m.info.input_tokens, out + m.info.output_tokens)
-                if m.session_id not in error_by_session and m.error is not None:
-                    error_by_session[m.session_id] = m.error
-
-        for sm in session_metrics:
-            inp, out = token_by_session.get(sm.session_id, (0, 0))
-            sm.total_input_tokens = inp
-            sm.total_output_tokens = out
-            sm.error = error_by_session.get(sm.session_id)
-            sm.success = (sm.num_nodes_completed == sm.num_nodes) and (sm.error is None)
 
         if report_config.summary:
             reports.append(
