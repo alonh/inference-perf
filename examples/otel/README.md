@@ -94,9 +94,6 @@ data:
     # Generation
     default_max_tokens: 1000                      # fallback if not in trace
 
-    # Dependency inference
-    dependency_window_ms: 120000                  # max lookahead for causal deps
-
     # Error handling
     include_errors: false                         # skip error spans (default)
     skip_invalid_files: true                      # skip unparseable trace files

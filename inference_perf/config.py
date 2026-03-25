@@ -115,9 +115,6 @@ class OTelTraceReplayConfig(BaseModel):
     # Request configuration
     default_max_tokens: int = Field(1000, gt=0, description="Default max_tokens if not specified in trace")
 
-    # Dependency inference
-    dependency_window_ms: int = Field(120_000, gt=0, description="Time window for dependency inference (ms)")
-
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(True, description="Skip invalid trace files instead of failing")

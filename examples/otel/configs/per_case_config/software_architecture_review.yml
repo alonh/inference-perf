@@ -39,7 +39,6 @@ data:
 
     default_max_tokens: 150
 
-    dependency_window_ms: 120000
     include_errors: false
     skip_invalid_files: true
 

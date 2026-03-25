@@ -372,9 +372,6 @@ data:
     # Generation parameters
     default_max_tokens: 1000                      # Fallback if output tokens are set to 0 in the otel file
 
-    # Dependency inference
-    dependency_window_ms: 120000                  # Max time window for causal dependency detection
-
     # Error handling
     include_errors: false                         # Skip spans with error status, that is, status != 0 (default)
     skip_invalid_files: true                      # Skip unparseable trace files during replay

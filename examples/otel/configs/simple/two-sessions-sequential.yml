@@ -19,9 +19,6 @@ data:
     # Request settings
     default_max_tokens: 100000
 
-    # Dependency inference settings
-    dependency_window_ms: 120000
-
     # Error handling
     include_errors: true
     skip_invalid_files: true
