@@ -29,13 +29,15 @@ This ensures that growing-context patterns (multi-turn conversations, agent chai
 faithfully: the KV cache sees the real generated text, not the static recorded text.
 
 The substitution is performed in `load_lazy_data` using the `NodeOutputRegistry`, which maps
-node_id → actual output text. The registry is backed by a `multiprocessing.Manager().dict()`
-so it is shared across all worker processes.
+node_id → actual output text. All registry data is stored in per-worker plain dicts; session-to-
+worker affinity ensures that the node writing an output and the nodes reading it always run on
+the same worker process.
 
 The actual output is captured in `OTelChatCompletionAPIData.process_response`, which overrides
 the base `ChatCompletionAPIData.process_response` to register the output after each LLM call.
 """
 
+import asyncio
 import json
 import logging
 import multiprocessing as mp
@@ -100,35 +102,43 @@ class OTelInferenceInfo(InferenceInfo):
 
 
 # ---------------------------------------------------------------------------
-# NodeOutputRegistry — shared cross-process output store
+# NodeOutputRegistry — per-worker output and message store
 # ---------------------------------------------------------------------------
 
 class NodeOutputRegistry:
-    """Thread- and process-safe registry mapping node_id → actual output text.
+    """Per-worker registry mapping node_id → actual output text and input messages.
 
-    Backed by a multiprocessing.Manager().dict() so all worker processes share
-    the same store. The manager must be started before the workers are forked.
+    All data is stored in plain in-process dicts. There is no Manager proxy for
+    output or messages — session-to-worker affinity guarantees that the node that
+    writes an output and the nodes that read it always run on the same worker process,
+    so cross-process sharing is not needed.
+
+    The only cross-process state is _failed_sessions, which is written by workers and
+    read by the main process to detect cascading failures.
 
     Usage:
-        manager = mp.Manager()
         registry = NodeOutputRegistry(manager)
-        # pass registry to OTelTraceReplayDataGenerator
-        # workers call registry.record(node_id, text) after each LLM call
-        # load_lazy_data calls registry.require(node_id) to get the output
+        # workers call registry.record(node_id, text, messages) after each LLM call
+        # dependent nodes call await registry.require_async(node_id) before dispatching
     """
 
     def __init__(self, manager: Optional[SyncManager] = None) -> None:
-        if manager is not None:
-            # Shared across processes via manager proxy
-            self._node_output_text: Dict[str, str] = manager.dict()  # type: ignore[assignment]
-            self._node_input_messages: Dict[str, Any] = manager.dict()  # type: ignore[assignment]
-            self._failed_sessions: Dict[str, bool] = manager.dict()  # type: ignore[assignment]
+        # Output text and input messages: plain dicts, same-worker only.
+        # Session-to-worker affinity guarantees that the node writing an output
+        # and the nodes reading it always run on the same worker process.
+        self._node_output_text: Dict[str, str] = {}
+        self._node_input_messages: Dict[str, Any] = {}
 
+        # Failed sessions must be visible to the main process (which polls
+        # check_session_completed) and to all workers (which check before waiting).
+        if manager is not None:
+            self._failed_sessions: Dict[str, bool] = manager.dict()  # type: ignore[assignment]
         else:
-            # Single-process fallback (e.g., tests, num_workers=0)
-            self._node_output_text = {}
-            self._node_input_messages = {}
             self._failed_sessions = {}
+
+        # One asyncio.Event per node. Only accessed from coroutines on this
+        # worker's single event loop; no lock needed.
+        self._node_events: Dict[str, asyncio.Event] = {}
 
     def mark_session_failed(self, session_id: str) -> None:
         """Mark a session as failed.
@@ -151,16 +161,15 @@ class NodeOutputRegistry:
         return self._failed_sessions.get(session_id, False)
 
     def record(self, node_id: str, output_text: str, messages: List[Any]) -> None:
-        """Register the actual output text for a completed node.
-
-        Args:
-            node_id: The node ID
-            output_text: The actual generated output
-            messages: The input messages
-        """
+        """Register output for a completed node and wake any async waiters."""
         self._node_output_text[node_id] = output_text
         if messages:
-            self._node_input_messages[node_id] = list(messages)  # Convert to list for storage
+            self._node_input_messages[node_id] = list(messages)
+
+        # Signal any coroutine waiting on this node (same worker only).
+        if node_id in self._node_events:
+            self._node_events[node_id].set()
+            logger.debug(f"Set asyncio.Event for node {node_id}")
 
     def get(self, node_id: str) -> Optional[str]:
         """Return the output text for node_id, or None if not yet registered."""
@@ -169,94 +178,61 @@ class NodeOutputRegistry:
     def get_output_by_node_id(self, node_id: str) -> Optional[str]:
         """Return the output text for a given node_id."""
         return self._node_output_text.get(node_id)
-    
+
     def get_messages_by_node_id(self, node_id: str) -> Optional[List[Any]]:
-        """Return the input messages for a given node_id.
-        
-        Args:
-            node_id: The node ID to look up
-            
-        Returns:
-            List of input messages, or None if not found
-        """
+        """Return the input messages for a given node_id."""
         return self._node_input_messages.get(node_id)
-    
+
     def get_node_ids(self) -> List[str]:
-        """Return all registered node IDs.
-        
-        Returns:
-            List of all node IDs that have registered outputs
-        """
+        """Return all registered node IDs."""
         return list(self._node_output_text.keys())
 
-    def require(self, node_id: str, timeout_sec: float = 30.0) -> str:
-        """Return the output text for node_id, waiting if not yet registered.
+    async def require_async(self, node_id: str, timeout_sec: float = 3600.0) -> str:
+        """Wait asynchronously for a node's output.
 
-        This is called when building the messages for a call that has an "output"
-        segment sourced from node_id. If the predecessor has not yet completed,
-        this method polls the registry until the output becomes available or timeout.
-
-        Args:
-            node_id: The node ID whose output is required
-            timeout_sec: Maximum time to wait for the output (default: 30s)
-
-        Returns:
-            The output text from the predecessor node
+        If the output is already available, returns immediately. Otherwise suspends
+        the calling coroutine until record() is called for this node_id, then resumes.
 
         Raises:
-            TimeoutError: If the output is not available within timeout_sec
+            TimeoutError: if output not available within timeout_sec
         """
-        start_time = time.time()
-        poll_interval = 0.01  # 10ms initial poll interval
-        max_poll_interval = 0.5  # Max 500ms between polls
-        last_log_time = start_time
+        # Fast path: predecessor already completed.
+        output = self._node_output_text.get(node_id)
+        if output is not None:
+            return output
 
-        while True:
-            output = self._node_output_text.get(node_id)
-            if output is not None:
-                elapsed = time.time() - start_time
-                if elapsed > 0.1:  # Log if we had to wait
-                    logger.debug(f"Got output for node {node_id} after {elapsed:.2f}s wait")
-                return output
+        # Create the event before any await point. Because asyncio is cooperative,
+        # record() cannot run between this line and the event.wait() below, so there
+        # is no window where the event could be set before we start waiting.
+        if node_id not in self._node_events:
+            self._node_events[node_id] = asyncio.Event()
+        event = self._node_events[node_id]
 
-            elapsed = time.time() - start_time
-            
-            # Log every 2 minute while waiting
-            if elapsed - (last_log_time - start_time) >= 120.0:
-                logger.warning(
-                    f"Still waiting for output from node '{node_id}' ({elapsed:.1f}s elapsed)"
-                )
-                last_log_time = time.time()
-            
-            if elapsed >= timeout_sec:
-                raise TimeoutError(
-                    f"NodeOutputRegistry: output for node '{node_id}' not available after "
-                    f"{timeout_sec:.1f}s. This means the predecessor call has not completed "
-                    f"within the timeout period. Check that predecessor_node_ids are correct "
-                    f"and that the predecessor is not blocked or failed."
-                )
+        # Second fast-path check: no await has occurred since the first check,
+        # but be defensive in case this method's call site changes in the future.
+        output = self._node_output_text.get(node_id)
+        if output is not None:
+            return output
 
-            # Exponential backoff for polling
-            time.sleep(min(poll_interval, max_poll_interval))
-            poll_interval *= 1.5
+        logger.debug(f"Node {node_id} waiting on asyncio.Event (zero threads)")
 
-    def wait_for_all(self, node_ids: List[str], timeout_sec: float = 30.0) -> None:
-        """Wait for all specified nodes to have registered outputs.
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"NodeOutputRegistry: output for '{node_id}' not available after "
+                f"{timeout_sec:.1f}s. Check that the predecessor is not blocked or failed."
+            )
 
-        Args:
-            node_ids: List of node IDs to wait for
-            timeout_sec: Maximum time to wait for all outputs (default: 30s)
-
-        Raises:
-            TimeoutError: If any output is not available within timeout_sec
-        """
-        if not node_ids:
-            return
-        
-        logger.debug(f"Waiting for {len(node_ids)} predecessor(s): {node_ids}")
-        for node_id in node_ids:
-            self.require(node_id, timeout_sec=timeout_sec)
-        logger.debug(f"All {len(node_ids)} predecessor(s) completed")
+        # record() writes _node_output_text before calling event.set(). Both run on
+        # the same single-threaded event loop, so the value is guaranteed to be present here.
+        output = self._node_output_text.get(node_id)
+        assert output is not None, (
+            f"asyncio.Event fired for {node_id} but output missing from local cache — "
+            "this is a bug in record()"
+        )
+        logger.debug(f"Node {node_id} woke from asyncio.Event")
+        return output
 
 
 # ---------------------------------------------------------------------------
@@ -300,63 +276,46 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     skip_request: bool = False
 
     async def wait_for_predecessors_and_substitute(self) -> None:
-        """Wait for predecessors asynchronously and substitute output segments.
-        
-        This method is called by the worker before dispatching the HTTP request.
-        It ensures that all predecessor nodes have completed and their outputs
-        are available, then substitutes "output" segments with actual predecessor
-        outputs instead of the recorded assistant messages.
-        
-        If the session has failed, this method skips processing and registers
-        empty output to unblock dependent nodes.
+        """Wait for all predecessor nodes to complete, then substitute output segments.
 
-        The waiting is done in an executor to avoid blocking the event loop.
+        Called by the worker before dispatching the HTTP request. Each predecessor
+        is awaited via asyncio.Event, so the coroutine suspends without consuming
+        any OS threads. All predecessors are waited in parallel via asyncio.gather.
+
+        Requires all nodes of this session to run on the same worker, which is
+        enforced by session-to-worker affinity in get_session_events().
         """
-        import asyncio
-        
         # Extract session_id from node_id (format: "session_id:node_xxx")
         session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
 
-        # Check if session has failed BEFORE waiting - if so, skip all processing
+        # Pre-wait check: if session already failed, skip immediately.
         if self.registry.is_session_failed(session_id):
             logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (pre-wait check)")
-            # Set flag to skip HTTP request
             self.skip_request = True
-            # Register empty output to unblock any dependent nodes
             self.registry.record(self.node_id, "", self.messages)
             if self.completion_callback:
-                logger.debug(f"[DEBUG] Calling completion_callback for skipped node (pre-wait): {self.node_id}")
                 self.completion_callback(self.node_id, time.perf_counter())
-                logger.debug(f"[DEBUG] completion_callback returned for: {self.node_id}")
             return
 
         if self.predecessor_node_ids:
             logger.debug(
-                f"Node {self.node_id} waiting for {len(self.predecessor_node_ids)} predecessor(s): "
-                f"{self.predecessor_node_ids}"
+                f"Node {self.node_id} waiting for {len(self.predecessor_node_ids)} "
+                f"predecessor(s)"
             )
-            # Run blocking wait in executor to avoid blocking event loop
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self.registry.wait_for_all,
-                self.predecessor_node_ids,
-                3600.0  # 1 hour timeout
-            )
-            logger.debug(f"Node {self.node_id} predecessors completed")
+            # Wait for all predecessors in parallel before proceeding.
+            await asyncio.gather(*[
+                self.registry.require_async(node_id, timeout_sec=3600.0)
+                for node_id in self.predecessor_node_ids
+            ])
+            logger.debug(f"Node {self.node_id} all predecessors done")
 
-            # Check AGAIN if session has failed AFTER waiting for predecessors
-            # (a predecessor might have failed while we were waiting)
+            # Post-wait check: a predecessor may have failed while we were waiting.
             if self.registry.is_session_failed(session_id):
                 logger.info(f"Node {self.node_id} skipping - session {session_id} has failed (post-wait check)")
-                # Set flag to skip HTTP request
                 self.skip_request = True
-                # Register empty output to unblock any dependent nodes
                 self.registry.record(self.node_id, "", self.messages)
                 if self.completion_callback:
-                    logger.debug(f"[DEBUG] Calling completion_callback for skipped node (post-wait): {self.node_id}")
                     self.completion_callback(self.node_id, time.perf_counter())
-                    logger.debug(f"[DEBUG] completion_callback returned for: {self.node_id}")
                 return
 
         # Wait additional delay specified in wait_ms
@@ -364,12 +323,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             wait_sec = self.wait_ms / 1000.0
             logger.debug(f"Node {self.node_id} waiting {wait_sec:.3f}s (wait_ms={self.wait_ms})")
             await asyncio.sleep(wait_sec)
-        
-        # Substitute output segments with actual predecessor outputs and also the shared segments after substitution
+
+        # Substitute output segments with actual predecessor outputs.
         if any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments):
             logger.debug(f"Node {self.node_id} substituting output/shared segments")
             substituted = self._build_messages_with_substitution()
-            # Update messages with substituted content
             self.messages = [
                 ChatMessage(role=m["role"], content=m["content"])
                 for m in substituted
@@ -423,7 +381,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                 if seg_msgs_from_parent is None:
                     logger.error(
                         f"CRITICAL: Node {self.node_id} shared segment from {seg.source_node_id} "
-                        f"has no messages in registry (should not happen after wait_for_all)"
+                        f"has no messages in registry (should not happen after require_async)"
                     )
                     # Fallback to original messages
                     result.extend(seg_msgs)
@@ -657,6 +615,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         tokenizer: Optional[CustomTokenizer],
         mp_manager: Optional[SyncManager] = None,
         base_seed: Optional[int] = None,
+        num_workers: int = 1,
     ) -> None:
         super().__init__(api_config, config, tokenizer)
 
@@ -665,6 +624,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
 
         self.otel_config = config.otel_trace_replay
         self.mp_manager = mp_manager
+        self.num_workers = max(1, num_workers)
         self.base_seed = base_seed if base_seed is not None else 42
         
         # Determine loading mode: directory or list of files
@@ -694,12 +654,13 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         else:
             raise ValueError("Either trace_directory or trace_files must be provided in otel_trace_replay config")
 
-        # Output registry: shared across all worker processes via mp.Manager().dict()
-        # If mp_manager is None (single-process mode), falls back to a plain dict.
+        # Output registry: per-worker plain dicts.
+        # If mp_manager is None (single-process mode), _failed_sessions falls back to a plain dict.
         self.output_registry = NodeOutputRegistry(manager=mp_manager)
 
-        # Shared session-node completion tracker for cross-process coordination
-        # Maps qualified_node_id -> completion_time (shared via Manager)
+        # Shared session-node completion tracker.
+        # Maps qualified_node_id -> completion_time. Shared via Manager so the
+        # main process can read completions recorded by worker processes.
         if mp_manager is not None:
             self._shared_node_completions: Dict[str, float] = mp_manager.dict()  # type: ignore[assignment]
         else:
@@ -777,6 +738,60 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         random.seed(self.base_seed)
         random.shuffle(self.sessions)
         logger.info(f"Randomized session order using seed: {self.base_seed}")
+        
+        # Duplicate sessions if needed to meet total session requirements
+        #self._duplicate_sessions_if_needed()
+    
+    def _duplicate_sessions_if_needed(self) -> None:
+        """Duplicate sessions to ensure we have enough for high-concurrency testing.
+        
+        This is useful when the trace corpus is smaller than needed for stress testing.
+        Sessions are duplicated with unique IDs to avoid conflicts.
+        Target: 300 sessions (enough for most test scenarios)
+        """
+        target_sessions = 300
+        current_count = len(self.sessions)
+        
+        if current_count >= target_sessions:
+            logger.info(
+                f"Session corpus sufficient: {current_count} sessions available "
+                f"(target: {target_sessions})"
+            )
+            return
+        
+        # Calculate how many duplicates we need
+        duplicates_needed = target_sessions - current_count
+        logger.warning(
+            f"Session corpus small: {current_count} sessions available. "
+            f"Duplicating to reach {target_sessions} sessions for stress testing."
+        )
+        
+        # Duplicate sessions in round-robin fashion
+        original_sessions = list(self.sessions)
+        duplicate_count = 0
+        session_idx = 0
+        
+        while len(self.sessions) < target_sessions:
+            # Get next session to duplicate (round-robin)
+            source_session = original_sessions[session_idx % len(original_sessions)]
+            session_idx += 1
+            duplicate_count += 1
+            
+            # Create duplicate with unique ID
+            duplicate_session = OTelTraceSession(
+                session_id=f"{source_session.session_id}_dup{duplicate_count}",
+                file_path=source_session.file_path,
+                file_index=source_session.file_index + 10000 + duplicate_count,  # Unique file_index
+                graph=source_session.graph,  # Graph can be shared (immutable)
+                start_offset_ms=source_session.start_offset_ms,
+            )
+            
+            self.sessions.append(duplicate_session)
+        
+        logger.info(
+            f"Duplicated {duplicates_needed} sessions. "
+            f"Total sessions now: {len(self.sessions)}"
+        )
     
     def _process_trace_file(self, trace_file: Path, file_index: int) -> Optional[OTelTraceSession]:
         """Process a single OTel JSON trace file into a ReplayGraph session."""
@@ -946,6 +961,10 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     def get_supported_apis(self) -> List[APIType]:
         """Return supported API types."""
         return [APIType.Chat]
+
+    def is_prefered_worker_requested(self) -> bool:
+        """Always True: all nodes of a session must run on the same worker for dependency waiting to work."""
+        return True
     
     def get_session_count(self) -> int:
         """Return the total number of sessions (trace files) available for replay."""
@@ -995,18 +1014,20 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         }
 
     def get_session_events(self, session_index: int) -> List[LazyLoadInferenceAPIData]:
-        """Get all events for a specific session as LazyLoadInferenceAPIData.
+        """Get all events for a session, all assigned to the same worker.
 
-        This is used by LoadGen to dispatch a session's events.
-
-        Args:
-            session_index: Index of the session (0-based)
-
-        Returns:
-            List of LazyLoadInferenceAPIData for this session's events
+        Assigning a deterministic worker to every event in a session ensures that
+        all nodes run on the same event loop, which is required for dependency
+        waiting to work correctly. The assignment is based on a hash of the session
+        ID, so it is stable within a single run but not across runs.
         """
+        session = self.sessions[session_index]
         event_indices = self.get_session_event_indices(session_index)
-        return [LazyLoadInferenceAPIData(data_index=idx) for idx in event_indices]
+        session_worker_id = abs(hash(session.session_id)) % self.num_workers
+        return [
+            LazyLoadInferenceAPIData(data_index=idx, prefered_worker_id=session_worker_id)
+            for idx in event_indices
+        ]
 
     def record_session_metric(self, metric: SessionLifecycleMetric) -> None:
         """Record a completed session's lifecycle metric."""
@@ -1117,18 +1138,12 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     def load_lazy_data(self, data: LazyLoadInferenceAPIData) -> InferenceAPIData:
         """Load the actual request data for a given index.
 
-        This method NO LONGER blocks waiting for predecessors. Instead, it passes
-        the dependency information (predecessor_node_ids, wait_ms, input_segments)
-        to the OTelChatCompletionAPIData instance, which will handle async waiting
-        in the worker before dispatching the HTTP request.
-
-        This prevents deadlock: workers don't block synchronously, so they can
-        process multiple requests and complete predecessors while others wait.
-
-        Returns an OTelChatCompletionAPIData instance that will:
-        1. Wait for predecessors asynchronously (in worker)
-        2. Substitute output segments with actual predecessor outputs
-        3. Register its own output after the LLM call completes
+        Returns an OTelChatCompletionAPIData instance carrying the dependency
+        information (predecessor_node_ids, wait_ms, input_segments). The worker
+        calls wait_for_predecessors_and_substitute() on this object before
+        dispatching the HTTP request, which suspends the coroutine until all
+        predecessors have completed and then substitutes their outputs into the
+        message list.
         """
         n = data.data_index
 
@@ -1137,7 +1152,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
 
         event = self.all_events[n]
 
-        # Convert messages to ChatMessage objects (no substitution yet - that happens async)
+        # Convert messages to ChatMessage objects (substitution happens later in the worker).
         chat_messages = []
         for msg in event.messages:
             role = msg.get("role", "user")
@@ -1162,14 +1177,14 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         # Fall back to config default if not available.
         max_tokens = event.expected_output_tokens or self.otel_config.default_max_tokens
 
-        # Return OTelChatCompletionAPIData with dependency info
-        # The worker will call wait_for_predecessors_and_substitute() before dispatching
+        # Return OTelChatCompletionAPIData with dependency info.
+        # The worker calls wait_for_predecessors_and_substitute() before dispatching.
         return OTelChatCompletionAPIData(
             messages=chat_messages,
             max_tokens=max_tokens,
             node_id=event.node_id,
             registry=self.output_registry,
-            # Pass dependency info for async handling
+            # Pass dependency info for the worker to use during async waiting
             predecessor_node_ids=event.predecessor_node_ids,
             wait_ms=event.wait_ms,
             input_segments=event.input_segments,
@@ -1233,11 +1248,11 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         # Remove node outputs and messages from registry
         for node_id in state.graph.nodes.keys():
             qualified_node_id = f"{session_id}:{node_id}"
-            
-            # Remove from output registry
+
             self.output_registry._node_output_text.pop(qualified_node_id, None)
             self.output_registry._node_input_messages.pop(qualified_node_id, None)
-            
+            self.output_registry._node_events.pop(qualified_node_id, None)
+
             # Remove from shared completion tracker. we might use this to track the completion of the session when generating reports, do not pop yet
             # self._shared_node_completions.pop(qualified_node_id, None)
         
