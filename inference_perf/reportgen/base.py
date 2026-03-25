@@ -28,6 +28,7 @@ from inference_perf.client.metricsclient.base import ModelServerMetrics
 from inference_perf.client.metricsclient.prometheus_client import PrometheusMetricsClient
 from inference_perf.client.requestdatacollector import RequestDataCollector
 from inference_perf.config import Config, PrometheusMetricsReportConfig, ReportConfig, SessionLifecycleReportConfig
+from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.utils import ReportFile
 
 logger = logging.getLogger(__name__)
@@ -466,6 +467,7 @@ class ReportGenerator:
         self.metrics_client = metrics_client
         self.config = config
         self.datagen = datagen
+        self.session_metrics_collector: Optional[SessionMetricsCollector] = None
 
     def get_metrics_collector(self) -> RequestDataCollector:
         """
@@ -569,10 +571,9 @@ class ReportGenerator:
             lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
 
         # Session-level reports (OTel agentic workloads only)
-        from inference_perf.datagen import TraceGenerator
-        if isinstance(self.datagen, TraceGenerator) and report_config.session_lifecycle:
+        if self.session_metrics_collector and report_config.session_lifecycle:
             session_reports = self.generate_session_reports(
-                self.datagen.get_session_metrics(),
+                self.session_metrics_collector.get_metrics(),
                 report_config.session_lifecycle,
                 percentiles,
             )
@@ -581,9 +582,7 @@ class ReportGenerator:
         lifecycle_reports.append(self.generate_config_report())
         return lifecycle_reports
 
-    def summarize_sessions(
-        self, metrics: List[SessionLifecycleMetric], percentiles: List[float]
-    ) -> dict:
+    def summarize_sessions(self, metrics: List[SessionLifecycleMetric], percentiles: List[float]) -> dict:
         """Compute aggregated stats across a list of session lifecycle metrics."""
         num_sessions = len(metrics)
         num_succeeded = sum(1 for m in metrics if m.success is True)
@@ -602,8 +601,12 @@ class ReportGenerator:
             "sessions_per_second": sessions_per_second,
             "session_duration_sec": summarize([m.duration_sec for m in metrics], percentiles),
             "num_nodes": summarize([float(m.num_nodes) for m in metrics], percentiles),
-            "total_input_tokens": summarize([float(m.total_input_tokens) for m in metrics if m.total_input_tokens is not None], percentiles),
-            "total_output_tokens": summarize([float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles),
+            "total_input_tokens": summarize(
+                [float(m.total_input_tokens) for m in metrics if m.total_input_tokens is not None], percentiles
+            ),
+            "total_output_tokens": summarize(
+                [float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles
+            ),
         }
 
     def generate_session_reports(
@@ -612,53 +615,43 @@ class ReportGenerator:
         report_config: SessionLifecycleReportConfig,
         percentiles: List[float],
     ) -> List[ReportFile]:
-        """Generate session-level lifecycle reports."""
+        """Generate session-level lifecycle reports.
+        
+        Note: Session metrics should be enriched (via SessionMetricsCollector.enrich_metrics())
+        before calling this method.
+        """
         reports: List[ReportFile] = []
 
         if not session_metrics:
             return reports
 
-        # Enrich session metrics with token totals and error/success now that
-        # the collector is fully populated (multiprocess collector only has
-        # data after the run completes).
-        request_metrics = self.metrics_collector.get_metrics()
-        token_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
-        error_by_session: dict[str, Optional[Any]] = {}
-        for m in request_metrics:
-            if m.session_id:
-                inp, out = token_by_session[m.session_id]
-                token_by_session[m.session_id] = (inp + m.info.input_tokens, out + m.info.output_tokens)
-                if m.session_id not in error_by_session and m.error is not None:
-                    error_by_session[m.session_id] = m.error
-
-        for sm in session_metrics:
-            inp, out = token_by_session.get(sm.session_id, (0, 0))
-            sm.total_input_tokens = inp
-            sm.total_output_tokens = out
-            sm.error = error_by_session.get(sm.session_id)
-            sm.success = (sm.num_nodes_completed == sm.num_nodes) and (sm.error is None)
-
         if report_config.summary:
-            reports.append(ReportFile(
-                name="summary_session_lifecycle_metrics",
-                contents=self.summarize_sessions(session_metrics, percentiles),
-            ))
+            reports.append(
+                ReportFile(
+                    name="summary_session_lifecycle_metrics",
+                    contents=self.summarize_sessions(session_metrics, percentiles),
+                )
+            )
 
         if report_config.per_stage:
             stage_buckets: dict[int, List[SessionLifecycleMetric]] = defaultdict(list)
             for m in session_metrics:
                 stage_buckets[m.stage_id].append(m)
             for stage_id, stage_metrics in stage_buckets.items():
-                reports.append(ReportFile(
-                    name=f"stage_{stage_id}_session_lifecycle_metrics",
-                    contents=self.summarize_sessions(stage_metrics, percentiles),
-                ))
+                reports.append(
+                    ReportFile(
+                        name=f"stage_{stage_id}_session_lifecycle_metrics",
+                        contents=self.summarize_sessions(stage_metrics, percentiles),
+                    )
+                )
 
         if report_config.per_session:
-            reports.append(ReportFile(
-                name="per_session_lifecycle_metrics",
-                contents=[m.model_dump() for m in session_metrics],
-            ))
+            reports.append(
+                ReportFile(
+                    name="per_session_lifecycle_metrics",
+                    contents=[m.model_dump() for m in session_metrics],
+                )
+            )
 
         return reports
 

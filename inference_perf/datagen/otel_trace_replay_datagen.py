@@ -40,23 +40,26 @@ the base `ChatCompletionAPIData.process_response` to register the output after e
 import asyncio
 import json
 import logging
-import multiprocessing as mp
 import random
 import time
 from dataclasses import dataclass, field, replace as dc_replace
 from multiprocessing.managers import SyncManager
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from aiohttp import ClientResponse
 
-from inference_perf.apis import ChatCompletionAPIData, InferenceAPIData, InferenceInfo, LazyLoadInferenceAPIData, SessionLifecycleMetric, ErrorResponseInfo
+from inference_perf.apis import (
+    ChatCompletionAPIData,
+    InferenceAPIData,
+    InferenceInfo,
+    LazyLoadInferenceAPIData,
+    SessionLifecycleMetric,
+)
 from inference_perf.apis.chat import ChatMessage
 from inference_perf.config import APIConfig, APIType, DataConfig
 from inference_perf.datagen.base import TraceGenerator, LazyLoadDataMixin
 from inference_perf.datagen.otel_trace_to_replay_graph import (
-    GraphCall,
-    GraphNode,
     InputSegment,
     ReplayGraph,
     build_raw_calls,
@@ -70,6 +73,7 @@ logger = logging.getLogger(__name__)
 # SessionGraphState — tracks graph traversal state for one session
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SessionGraphState:
     """Tracks graph traversal state for one session.
@@ -77,6 +81,7 @@ class SessionGraphState:
     Manages which nodes are ready to dispatch, which have been dispatched,
     and which have completed. Used for graph-based traversal.
     """
+
     session_id: str
     graph: ReplayGraph
     ready_nodes: Set[str]  # node_ids ready to dispatch (predecessors done)
@@ -91,6 +96,7 @@ class SessionGraphState:
 # OTelInferenceInfo — InferenceInfo subclass that carries the output text
 # ---------------------------------------------------------------------------
 
+
 class OTelInferenceInfo(InferenceInfo):
     """InferenceInfo subclass that also carries the raw output text.
 
@@ -98,12 +104,14 @@ class OTelInferenceInfo(InferenceInfo):
     and adds output_text so the OTel replay path can register the actual
     generated text in the NodeOutputRegistry without touching the base class.
     """
+
     output_text: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
 # NodeOutputRegistry — per-worker output and message store
 # ---------------------------------------------------------------------------
+
 
 class NodeOutputRegistry:
     """Per-worker registry mapping node_id → actual output text and input messages.
@@ -180,11 +188,22 @@ class NodeOutputRegistry:
         return self._node_output_text.get(node_id)
 
     def get_messages_by_node_id(self, node_id: str) -> Optional[List[Any]]:
-        """Return the input messages for a given node_id."""
+        """Return the input messages for a given node_id.
+
+        Args:
+            node_id: The node ID to look up
+
+        Returns:
+            List of input messages, or None if not found
+        """
         return self._node_input_messages.get(node_id)
 
     def get_node_ids(self) -> List[str]:
-        """Return all registered node IDs."""
+        """Return all registered node IDs.
+
+        Returns:
+            List of all node IDs that have registered outputs
+        """
         return list(self._node_output_text.keys())
 
     async def require_async(self, node_id: str, timeout_sec: float = 3600.0) -> str:
@@ -239,6 +258,7 @@ class NodeOutputRegistry:
 # OTelChatCompletionAPIData — captures output and registers it in the registry
 # ---------------------------------------------------------------------------
 
+
 class OTelChatCompletionAPIData(ChatCompletionAPIData):
     """ChatCompletionAPIData subclass for OTel trace replay.
 
@@ -249,7 +269,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
     The registry and node_id are passed at construction time via Pydantic fields.
     arbitrary_types_allowed is required because NodeOutputRegistry is not a Pydantic model.
-    
+
     Dependency handling:
     - predecessor_node_ids: List of nodes that must complete before this one
     - wait_ms: Additional delay after predecessors complete
@@ -261,17 +281,17 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
     node_id: str
     registry: NodeOutputRegistry
-    
+
     # Dependency information for async waiting
     predecessor_node_ids: List[str] = field(default_factory=list)
     wait_ms: int = 0
     input_segments: List[InputSegment] = field(default_factory=list)
     original_messages: List[Dict[str, Any]] = field(default_factory=list)
     expected_output_content: Optional[str] = None
-    
+
     # Completion callback for graph traversal
     completion_callback: Optional[Callable[[str, float], None]] = None
-    
+
     # Flag to skip HTTP request (set when session fails)
     skip_request: bool = False
 
@@ -286,7 +306,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         enforced by session-to-worker affinity in get_session_events().
         """
         # Extract session_id from node_id (format: "session_id:node_xxx")
-        session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
+        session_id = self.node_id.split(":")[0] if ":" in self.node_id else self.node_id
 
         # Pre-wait check: if session already failed, skip immediately.
         if self.registry.is_session_failed(session_id):
@@ -346,14 +366,15 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         cursor = 0
 
         for seg in self.input_segments:
-            seg_msgs = self.original_messages[cursor:cursor + seg.message_count]
+            seg_msgs = self.original_messages[cursor : cursor + seg.message_count]
 
             if seg.type == "output":
                 # Output segment: substitute with actual output from the specific predecessor
                 if seg.source_node_id:
                     actual_output = self.registry.get_output_by_node_id(seg.source_node_id)
                     logger.debug(
-                        f"Registry get for node {self.node_id} output segment from {seg.source_node_id} generated: {actual_output}")
+                        f"Registry get for node {self.node_id} output segment from {seg.source_node_id} generated: {actual_output}"
+                    )
 
                     if actual_output:
                         for msg in seg_msgs:
@@ -361,8 +382,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                             substituted["content"] = actual_output
                             result.append(substituted)
                         logger.debug(
-                            f"Node {self.node_id}: substituted output segment "
-                            f"with actual output from {seg.source_node_id}"
+                            f"Node {self.node_id}: substituted output segment with actual output from {seg.source_node_id}"
                         )
                     else:
                         logger.warning(
@@ -371,10 +391,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                         )
                         result.extend(seg_msgs)
                 else:
-                    logger.warning(
-                        f"Node {self.node_id}: output segment has no source_node_id, "
-                        f"using recorded content"
-                    )
+                    logger.warning(f"Node {self.node_id}: output segment has no source_node_id, using recorded content")
                     result.extend(seg_msgs)
             elif seg.type == "shared":
                 seg_msgs_from_parent = self.registry.get_messages_by_node_id(seg.source_node_id)
@@ -396,11 +413,11 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                             f"had different number of messages in parent node: {len(seg_msgs_from_parent)}, "
                             f"num messages in seg: {len(seg_msgs)}"
                         )
-                    for msg_idx, msg in enumerate(seg_msgs_from_parent):
+                    for msg in seg_msgs_from_parent:
                         result.append(dict(msg))
             elif seg.type == "unique":
                 # Unique message, keep as-is
-                for msg_idx, msg in enumerate(seg_msgs):
+                for msg in seg_msgs:
                     result.append(msg)
             else:
                 # Unknown segment type, keep as-is
@@ -410,20 +427,20 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
         return result
 
-    
     def on_completion(self, info: InferenceInfo) -> None:
         """Called after every request completes (real or mock) to register output and unblock successors."""
         output_text = info.output_text if isinstance(info, OTelInferenceInfo) else ""
         output_text = output_text or ""
         self.registry.record(self.node_id, output_text, self.messages)
-        logger.debug(f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output: {output_text}")
+        logger.debug(
+            f"calling registry record for node {self.node_id} num input messages {len(self.messages)} and output: {output_text}"
+        )
         if self.completion_callback:
             logger.debug(f"Calling completion callback for node {self.node_id}")
             self.completion_callback(self.node_id, time.perf_counter())
             logger.debug(f"Completion callback finished for node {self.node_id}")
         else:
             logger.warning(f"No completion callback set for node {self.node_id}")
-
 
     async def process_response(
         self,
@@ -479,9 +496,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             prompt_len = tokenizer.count_tokens("".join([m.content for m in self.messages]))
             choices = data.get("choices", [])
             if choices:
-                output_text = "".join(
-                    [choice.get("message", {}).get("content", "") for choice in choices]
-                )
+                output_text = "".join([choice.get("message", {}).get("content", "") for choice in choices])
             output_len = tokenizer.count_tokens(output_text)
             info = OTelInferenceInfo(
                 input_tokens=prompt_len,
@@ -494,9 +509,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         self.on_completion(info)
 
         if output_text:
-            logger.debug(
-                f"Registered output for node {self.node_id}: {len(output_text)} chars : {output_text}"
-            )
+            logger.debug(f"Registered output for node {self.node_id}: {len(output_text)} chars : {output_text}")
         else:
             logger.debug(f"Registered empty output for node {self.node_id}")
 
@@ -529,12 +542,10 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         Returns:
             OTelInferenceInfo with empty output
         """
-        logger.error(
-            f"Request failed for node {self.node_id}: {type(exception).__name__}: {str(exception)}"
-        )
+        logger.error(f"Request failed for node {self.node_id}: {type(exception).__name__}: {str(exception)}")
 
         # Extract session_id from node_id (format: "session_id:node_xxx")
-        session_id = self.node_id.split(':')[0] if ':' in self.node_id else self.node_id
+        session_id = self.node_id.split(":")[0] if ":" in self.node_id else self.node_id
 
         # Mark the entire session as failed to prevent other nodes from processing
         self.registry.mark_session_failed(session_id)
@@ -550,9 +561,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         # Call on_completion to register empty output and unblock dependents
         self.on_completion(empty_info)
 
-        logger.info(
-            f"Called on_completion() for failed node {self.node_id} to unblock dependent nodes"
-        )
+        logger.info(f"Called on_completion() for failed node {self.node_id} to unblock dependent nodes")
 
         return empty_info
 
@@ -561,6 +570,7 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 # OTelTraceReplayEvent — one event per graph node
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class OTelTraceReplayEvent:
     """Represents a single LLM request event from an OTel trace, derived from a GraphCall."""
@@ -568,12 +578,12 @@ class OTelTraceReplayEvent:
     call_id: str
     node_id: str
     file_index: int
-    t_start_ms: int   # node start time (adjusted for time_scale + session offset)
-    t_end_ms: int     # node end time
+    t_start_ms: int  # node start time (adjusted for time_scale + session offset)
+    t_end_ms: int  # node end time
     model: str
-    messages: List[Dict[str, Any]]          # original (recorded) messages — used as template
+    messages: List[Dict[str, Any]]  # original (recorded) messages — used as template
     expected_output: str
-    input_segments: List[InputSegment]      # segment decomposition for output substitution
+    input_segments: List[InputSegment]  # segment decomposition for output substitution
     expected_output_tokens: int
     temperature: Optional[float]
     max_tokens_recorded: Optional[int]
@@ -596,7 +606,7 @@ class OTelTraceSession:
 class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     """
     Data generator that replays LLM requests from OpenTelemetry trace files.
-    
+
     Features:
     - Processes multiple OTel JSON files from a directory
     - Each file becomes a separate session
@@ -607,7 +617,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     - Output-aware: substitutes recorded assistant messages with actual LLM outputs
       for growing-context patterns (multi-turn, agent chains)
     """
-    
+
     def __init__(
         self,
         api_config: APIConfig,
@@ -619,22 +629,22 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     ) -> None:
         super().__init__(api_config, config, tokenizer)
 
-        if not hasattr(config, 'otel_trace_replay') or config.otel_trace_replay is None:
+        if not hasattr(config, "otel_trace_replay") or config.otel_trace_replay is None:
             raise ValueError("otel_trace_replay configuration is required for OTelTraceReplayDataGenerator")
 
         self.otel_config = config.otel_trace_replay
         self.mp_manager = mp_manager
         self.num_workers = max(1, num_workers)
         self.base_seed = base_seed if base_seed is not None else 42
-        
+
         # Determine loading mode: directory or list of files
         if self.otel_config.trace_directory:
             self.trace_dir: Optional[Path] = Path(self.otel_config.trace_directory)
             self.load_mode = "directory"
-            
+
             if not self.trace_dir.exists():
                 raise ValueError(f"Trace directory does not exist: {self.trace_dir}")
-            
+
             if not self.trace_dir.is_dir():
                 raise ValueError(f"Trace directory path is not a directory: {self.trace_dir}")
         elif self.otel_config.trace_files:
@@ -642,14 +652,14 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             self.trace_files_list = [Path(f) for f in self.otel_config.trace_files]
             self.load_mode = "files_list"
             self.trace_dir = None  # Not needed for files_list mode
-            
+
             # Validate all files exist and are JSON
             for trace_file in self.trace_files_list:
                 if not trace_file.exists():
                     raise ValueError(f"Trace file does not exist: {trace_file}")
                 if not trace_file.is_file():
                     raise ValueError(f"Trace file path is not a file: {trace_file}")
-                if trace_file.suffix != '.json':
+                if trace_file.suffix != ".json":
                     raise ValueError(f"Trace file must be a JSON file: {trace_file}")
         else:
             raise ValueError("Either trace_directory or trace_files must be provided in otel_trace_replay config")
@@ -666,9 +676,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         else:
             self._shared_node_completions = {}
 
-        # Accumulated session-level metrics (populated by LoadGen at session completion)
-        self._session_metrics: List[SessionLifecycleMetric] = []
-
         # Load and process all OTel trace files
         self.sessions: List[OTelTraceSession] = []
         self._load_trace_files()
@@ -681,15 +688,13 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         self.event_to_node: Dict[int, str] = {}  # event_idx → node_id
 
         if not self.sessions:
-            raise ValueError(f"No valid OTel trace files found")
+            raise ValueError("No valid OTel trace files found")
 
         # Build flat list of all events across all sessions for replay
         self._build_replay_schedule()
 
-        logger.debug(
-            f"Loaded {len(self.sessions)} sessions with {len(self.all_events)} total events"
-        )
-    
+        logger.debug(f"Loaded {len(self.sessions)} sessions with {len(self.all_events)} total events")
+
     def _load_trace_files(self) -> None:
         """Load and process OTel JSON files based on the configured mode."""
         if self.load_mode == "files_list":
@@ -701,10 +706,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                     if session:
                         self.sessions.append(session)
                         node_count = len(session.graph.nodes)
-                        logger.info(
-                            f"Loaded session {session.session_id} from {trace_file.name} "
-                            f"with {node_count} nodes"
-                        )
+                        logger.info(f"Loaded session {session.session_id} from {trace_file.name} with {node_count} nodes")
                 except Exception as e:
                     logger.error(f"Failed to process trace file {trace_file}: {e}")
                     if not self.otel_config.skip_invalid_files:
@@ -712,71 +714,68 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         elif self.load_mode == "directory":
             # Directory mode: load all JSON files from the directory
             trace_files = sorted(self.trace_dir.glob("*.json"))
-            
+
             if not trace_files:
                 logger.warning(f"No JSON files found in {self.trace_dir}")
                 return
-            
+
             logger.info(f"Found {len(trace_files)} trace files in {self.trace_dir}")
-            
+
             for file_index, trace_file in enumerate(trace_files):
                 try:
                     session = self._process_trace_file(trace_file, file_index)
                     if session:
                         self.sessions.append(session)
                         node_count = len(session.graph.nodes)
-                        logger.info(
-                            f"Loaded session {session.session_id} from {trace_file.name} "
-                            f"with {node_count} nodes"
-                        )
+                        logger.info(f"Loaded session {session.session_id} from {trace_file.name} with {node_count} nodes")
                 except Exception as e:
                     logger.error(f"Failed to process trace file {trace_file}: {e}")
                     if not self.otel_config.skip_invalid_files:
                         raise
-        
+
         # Randomize session order using base_seed for reproducibility
         random.seed(self.base_seed)
         random.shuffle(self.sessions)
         logger.info(f"Randomized session order using seed: {self.base_seed}")
-        
+
         # Duplicate sessions if needed to meet total session requirements
         #self._duplicate_sessions_if_needed()
-    
+
     def _duplicate_sessions_if_needed(self) -> None:
         """Duplicate sessions to ensure we have enough for high-concurrency testing.
-        
+
         This is useful when the trace corpus is smaller than needed for stress testing.
         Sessions are duplicated with unique IDs to avoid conflicts.
         Target: 300 sessions (enough for most test scenarios)
         """
         target_sessions = 300
         current_count = len(self.sessions)
-        
+
         if current_count >= target_sessions:
             logger.info(
                 f"Session corpus sufficient: {current_count} sessions available "
                 f"(target: {target_sessions})"
             )
             return
-        
+
         # Calculate how many duplicates we need
         duplicates_needed = target_sessions - current_count
         logger.warning(
             f"Session corpus small: {current_count} sessions available. "
             f"Duplicating to reach {target_sessions} sessions for stress testing."
         )
-        
+
         # Duplicate sessions in round-robin fashion
         original_sessions = list(self.sessions)
         duplicate_count = 0
         session_idx = 0
-        
+
         while len(self.sessions) < target_sessions:
             # Get next session to duplicate (round-robin)
             source_session = original_sessions[session_idx % len(original_sessions)]
             session_idx += 1
             duplicate_count += 1
-            
+
             # Create duplicate with unique ID
             duplicate_session = OTelTraceSession(
                 session_id=f"{source_session.session_id}_dup{duplicate_count}",
@@ -785,14 +784,14 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                 graph=source_session.graph,  # Graph can be shared (immutable)
                 start_offset_ms=source_session.start_offset_ms,
             )
-            
+
             self.sessions.append(duplicate_session)
-        
+
         logger.info(
             f"Duplicated {duplicates_needed} sessions. "
             f"Total sessions now: {len(self.sessions)}"
         )
-    
+
     def _process_trace_file(self, trace_file: Path, file_index: int) -> Optional[OTelTraceSession]:
         """Process a single OTel JSON trace file into a ReplayGraph session."""
         try:
@@ -837,12 +836,12 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
 
     def _build_replay_schedule(self) -> None:
         """Build the replay schedule using graph traversal (no time-based sorting).
-        
+
         Creates event list and initializes session graph states for traversal.
         Sessions are activated on-demand based on concurrent_sessions limit.
         """
         self.all_events: List[OTelTraceReplayEvent] = []
-        
+
         for session in self.sessions:
             # Initialize session graph state
             state = SessionGraphState(
@@ -856,20 +855,18 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                 is_complete=False,
             )
             self.session_graph_state[session.session_id] = state
-            
+
             # Build events for indexing (no time-based sorting)
             for node in session.graph.nodes.values():
                 gc = node.call
-                
+
                 if not gc.messages:
                     logger.warning(f"Call {gc.call_id} in node {node.node_id} has no messages, skipping")
                     continue
-                
+
                 # Qualify node_id with session to avoid collisions
                 qualified_node_id = f"{session.session_id}:{node.node_id}"
-                qualified_predecessor_ids = [
-                    f"{session.session_id}:{pid}" for pid in node.predecessor_node_ids
-                ]
+                qualified_predecessor_ids = [f"{session.session_id}:{pid}" for pid in node.predecessor_node_ids]
 
                 # Rewrite source_node_id in input_segments
                 qualified_segments = [
@@ -878,32 +875,33 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                     else seg
                     for seg in gc.input_segments
                 ]
-                
+
                 event_idx = len(self.all_events)
-                
-                self.all_events.append(OTelTraceReplayEvent(
-                    call_id=gc.call_id,
-                    node_id=qualified_node_id,
-                    file_index=session.file_index,
-                    t_start_ms=0,  # Not used in graph traversal
-                    t_end_ms=0,    # Not used in graph traversal
-                    model=gc.model,
-                    messages=gc.messages,
-                    expected_output=gc.expected_output,
-                    input_segments=qualified_segments,
-                    expected_output_tokens=gc.expected_output_tokens,
-                    temperature=gc.temperature,
-                    max_tokens_recorded=gc.max_tokens_recorded,
-                    predecessor_node_ids=qualified_predecessor_ids,
-                    wait_ms=node.wait_ms,
-                ))
-                
+
+                self.all_events.append(
+                    OTelTraceReplayEvent(
+                        call_id=gc.call_id,
+                        node_id=qualified_node_id,
+                        file_index=session.file_index,
+                        t_start_ms=0,  # Not used in graph traversal
+                        t_end_ms=0,  # Not used in graph traversal
+                        model=gc.model,
+                        messages=gc.messages,
+                        expected_output=gc.expected_output,
+                        input_segments=qualified_segments,
+                        expected_output_tokens=gc.expected_output_tokens,
+                        temperature=gc.temperature,
+                        max_tokens_recorded=gc.max_tokens_recorded,
+                        predecessor_node_ids=qualified_predecessor_ids,
+                        wait_ms=node.wait_ms,
+                    )
+                )
+
                 # Build index mappings
                 self.event_to_session[event_idx] = session.session_id
                 self.event_to_node[event_idx] = node.node_id
-        
+
         # NO SORTING - events accessed by index via mappings
-        
 
         logger.info(
             f"Built replay schedule: {len(self.all_events)} events across "
@@ -915,16 +913,13 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         state = self.session_graph_state[session_id]
         state.is_active = True
         self.active_session_ids.add(session_id)
-        
+
         # Find and activate root nodes (no predecessors)
-        root_nodes = {
-            node_id for node_id, node in state.graph.nodes.items()
-            if not node.predecessor_node_ids
-        }
+        root_nodes = {node_id for node_id, node in state.graph.nodes.items() if not node.predecessor_node_ids}
         state.ready_nodes.update(root_nodes)
-        
+
         logger.info(f"Activated session {session_id} with {len(root_nodes)} root nodes")
-    
+
     def _get_effective_model(self, recorded_model: str) -> str:
         """Get the effective model name for a request."""
         if self.otel_config.use_static_model:
@@ -938,26 +933,26 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
 
     def get_request_count(self) -> int:
         """Return total number of requests to replay from active sessions only.
-        
+
         Only counts events from currently active sessions, not pending ones.
         Pending sessions will be activated later and their events yielded in subsequent calls.
         """
         # Count events from active sessions only
         total_events = 0
-        
+
         for session_id in self.active_session_ids:
             state = self.session_graph_state.get(session_id)
             if state:
                 total_events += len(state.graph.nodes)
-        
+
         logger.info(
             f"get_request_count: {total_events} events from "
             f"{len(self.active_session_ids)} active session(s) "
             f"({len(self.pending_session_ids)} pending)"
         )
-        
+
         return total_events
-    
+
     def get_supported_apis(self) -> List[APIType]:
         """Return supported API types."""
         return [APIType.Chat]
@@ -965,45 +960,45 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
     def is_prefered_worker_requested(self) -> bool:
         """Always True: all nodes of a session must run on the same worker for dependency waiting to work."""
         return True
-    
+
     def get_session_count(self) -> int:
         """Return the total number of sessions (trace files) available for replay."""
         return len(self.sessions)
-    
+
     def get_session_event_indices(self, session_index: int) -> List[int]:
         """Get the event indices for a specific session.
-        
+
         Args:
             session_index: Index of the session (0-based)
-            
+
         Returns:
             List of event indices (into self.all_events) that belong to this session
-            
+
         Raises:
             IndexError: If session_index is out of range
         """
         if session_index < 0 or session_index >= len(self.sessions):
             raise IndexError(f"Session index {session_index} out of range (total: {len(self.sessions)})")
-        
+
         session = self.sessions[session_index]
         # Find all events that belong to this session by matching file_index
         return [i for i, event in enumerate(self.all_events) if event.file_index == session.file_index]
-    
+
     def get_session_info(self, session_index: int) -> Dict[str, Any]:
         """Get information about a specific session.
-        
+
         Args:
             session_index: Index of the session (0-based)
-            
+
         Returns:
             Dictionary with session metadata
         """
         if session_index < 0 or session_index >= len(self.sessions):
             raise IndexError(f"Session index {session_index} out of range (total: {len(self.sessions)})")
-        
+
         session = self.sessions[session_index]
         event_indices = self.get_session_event_indices(session_index)
-        
+
         return {
             "session_id": session.session_id,
             "file_path": str(session.file_path),
@@ -1028,14 +1023,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             LazyLoadInferenceAPIData(data_index=idx, prefered_worker_id=session_worker_id)
             for idx in event_indices
         ]
-
-    def record_session_metric(self, metric: SessionLifecycleMetric) -> None:
-        """Record a completed session's lifecycle metric."""
-        self._session_metrics.append(metric)
-
-    def get_session_metrics(self) -> List[SessionLifecycleMetric]:
-        """Return all recorded session lifecycle metrics."""
-        return self._session_metrics
 
     def build_session_metric(
         self,
@@ -1094,10 +1081,7 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         state.is_active = True
 
         # Find and activate root nodes (no predecessors)
-        root_nodes = {
-            node_id for node_id, node in state.graph.nodes.items()
-            if not node.predecessor_node_ids
-        }
+        root_nodes = {node_id for node_id, node in state.graph.nodes.items() if not node.predecessor_node_ids}
         state.ready_nodes.update(root_nodes)
 
         logger.info(f"Activated session {session_id} with {len(root_nodes)} root nodes")
@@ -1189,32 +1173,29 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             wait_ms=event.wait_ms,
             input_segments=event.input_segments,
             original_messages=event.messages,
-            expected_output_content=event.expected_output, #expected_output_content,
+            expected_output_content=event.expected_output,  # expected_output_content,
             # Pass completion callback for graph traversal
             completion_callback=self._on_node_completed,
         )
 
-
     def _find_event_index(self, session_id: str, node_id: str) -> int:
         """Find the event index for a given session and node_id.
-        
+
         Uses the event_to_session and event_to_node mappings for O(n) lookup.
         Could be optimized with a reverse index if needed.
         """
         qualified_node_id = f"{session_id}:{node_id}"
-        
+
         for idx, event in enumerate(self.all_events):
             if event.node_id == qualified_node_id:
                 return idx
-        
+
         raise ValueError(
-            f"Event not found: session={session_id}, node={node_id}. "
-            f"This indicates a bug in the graph traversal logic."
+            f"Event not found: session={session_id}, node={node_id}. This indicates a bug in the graph traversal logic."
         )
 
-# Made with Bob
+    # Made with Bob
 
-    
     def _on_node_completed(self, qualified_node_id: str, completion_time: float) -> None:
         """Called when a node completes. Records completion in shared state.
 
@@ -1229,11 +1210,11 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
 
     def cleanup_session(self, session_id: str) -> None:
         """Clean up memory for a completed session.
-        
+
         Removes all node outputs, messages, and completion tracking data
         for the specified session to prevent memory leaks in long-running
         benchmarks with many sessions.
-        
+
         Args:
             session_id: The session ID to clean up
         """
@@ -1241,24 +1222,24 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
         if state is None:
             logger.warning(f"Attempted to cleanup unknown session: {session_id}")
             return
-        
+
         # Count nodes for logging
         node_count = len(state.graph.nodes)
-        
+
         # Remove node outputs and messages from registry
         for node_id in state.graph.nodes.keys():
             qualified_node_id = f"{session_id}:{node_id}"
 
+
+            # Remove from output registry
             self.output_registry._node_output_text.pop(qualified_node_id, None)
             self.output_registry._node_input_messages.pop(qualified_node_id, None)
             self.output_registry._node_events.pop(qualified_node_id, None)
 
             # Remove from shared completion tracker. we might use this to track the completion of the session when generating reports, do not pop yet
             # self._shared_node_completions.pop(qualified_node_id, None)
-        
+
         # Remove session state
         del self.session_graph_state[session_id]
-        
-        logger.debug(
-            f"Cleaned up session {session_id}: removed {node_count} nodes from memory"
-        )
+
+        logger.debug(f"Cleaned up session {session_id}: removed {node_count} nodes from memory")

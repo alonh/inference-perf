@@ -24,14 +24,9 @@ class BaseGenerator(ABC):
     api_config: APIConfig
     tokenizer: Optional[CustomTokenizer]
 
-    def __init__(
-        self,
-        api_config: APIConfig,
-        config: DataConfig,
-        tokenizer: Optional[CustomTokenizer]
-    ) -> None:
+    def __init__(self, api_config: APIConfig, config: DataConfig, tokenizer: Optional[CustomTokenizer]) -> None:
         """Initialize base generator with common attributes.
-        
+
         Args:
             api_config: API configuration (Chat, Completion, etc.)
             config: Data configuration
@@ -40,18 +35,18 @@ class BaseGenerator(ABC):
         # Validate API type
         if api_config.type not in self.get_supported_apis():
             raise Exception(f"Unsupported API type {api_config}")
-        
+
         self.api_config = api_config
         self.tokenizer = tokenizer
-    
+
     @abstractmethod
     def get_supported_apis(self) -> List[APIType]:
         """Return list of supported API types (Chat, Completion, etc.)."""
         raise NotImplementedError
-    
+
     def is_prefered_worker_requested(self) -> bool:
         """Whether this generator requests preferred worker routing.
-        
+
         Returns False by default. Override to enable worker affinity.
         """
         return False
@@ -65,14 +60,9 @@ class DataGenerator(BaseGenerator):
     shared_prefix: Optional[SharedPrefix]
     trace: Optional[TraceConfig]
 
-    def __init__(
-        self,
-        api_config: APIConfig,
-        config: DataConfig,
-        tokenizer: Optional[CustomTokenizer]
-    ) -> None:
+    def __init__(self, api_config: APIConfig, config: DataConfig, tokenizer: Optional[CustomTokenizer]) -> None:
         """Initialize data generator with distribution and prefix support.
-        
+
         Args:
             api_config: API configuration
             config: Data configuration including distributions and shared prefix
@@ -97,7 +87,7 @@ class DataGenerator(BaseGenerator):
     @abstractmethod
     def get_data(self) -> Generator[InferenceAPIData, None, None]:
         """Generate stream of individual requests.
-        
+
         Yields:
             InferenceAPIData objects for each request
         """
@@ -116,7 +106,7 @@ class DataGenerator(BaseGenerator):
 
 class TraceGenerator(BaseGenerator):
     """Session-based trace replay for agentic workloads (TRACE_SESSION_REPLAY load type).
-    
+
     Unlike DataGenerator which streams individual requests, TraceGenerator manages
     sessions with dependencies between requests. Used for replaying complex multi-turn
     conversations and agentic workflows.
@@ -130,10 +120,10 @@ class TraceGenerator(BaseGenerator):
     @abstractmethod
     def get_session_info(self, session_index: int) -> Dict[str, Any]:
         """Get metadata about a specific session.
-        
+
         Args:
             session_index: Index of the session (0-based)
-            
+
         Returns:
             Dictionary with session metadata (session_id, file_path, num_events, etc.)
         """
@@ -142,10 +132,10 @@ class TraceGenerator(BaseGenerator):
     @abstractmethod
     def get_session_event_indices(self, session_index: int) -> List[int]:
         """Get event indices for a specific session.
-        
+
         Args:
             session_index: Index of the session (0-based)
-            
+
         Returns:
             List of event indices that belong to this session
         """
@@ -154,12 +144,12 @@ class TraceGenerator(BaseGenerator):
     @abstractmethod
     def get_session_events(self, session_index: int) -> List[LazyLoadInferenceAPIData]:
         """Get all events for a session as lazy-loadable data.
-        
+
         This is used by LoadGen to dispatch a session's events.
-        
+
         Args:
             session_index: Index of the session (0-based)
-            
+
         Returns:
             List of LazyLoadInferenceAPIData for this session's events
         """
@@ -168,7 +158,7 @@ class TraceGenerator(BaseGenerator):
     @abstractmethod
     def activate_session(self, session_id: str) -> None:
         """Activate a session (called by LoadGen when starting a session).
-        
+
         Args:
             session_id: The session ID to activate
         """
@@ -177,10 +167,10 @@ class TraceGenerator(BaseGenerator):
     @abstractmethod
     def check_session_completed(self, session_id: str) -> bool:
         """Check if a session has completed all its events.
-        
+
         Args:
             session_id: The session ID to check
-            
+
         Returns:
             True if all events in the session have completed
         """
@@ -195,43 +185,25 @@ class TraceGenerator(BaseGenerator):
         end_time: float,
     ) -> Any:  # Returns SessionLifecycleMetric but avoiding circular import
         """Build session-level lifecycle metric.
-        
+
         Args:
             session_id: The session ID
             stage_id: The stage ID this session ran in
             start_time: Session start time (epoch)
             end_time: Session end time (epoch)
-            
+
         Returns:
             SessionLifecycleMetric object
         """
         raise NotImplementedError
 
     @abstractmethod
-    def record_session_metric(self, metric: Any) -> None:
-        """Record a completed session's lifecycle metric.
-        
-        Args:
-            metric: SessionLifecycleMetric to record
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_session_metrics(self) -> List[Any]:
-        """Return all recorded session lifecycle metrics.
-        
-        Returns:
-            List of SessionLifecycleMetric objects
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def cleanup_session(self, session_id: str) -> None:
         """Clean up memory for a completed session.
-        
+
         Removes all node outputs, messages, and completion tracking data
         for the specified session to prevent memory leaks.
-        
+
         Args:
             session_id: The session ID to clean up
         """
@@ -241,10 +213,10 @@ class TraceGenerator(BaseGenerator):
 class LazyLoadDataMixin(ABC):
     """
     Mixin for generators that support lazy loading (works with both DataGenerator and TraceGenerator).
-    
+
     This is a capability marker - generators inherit from it to signal lazy-load support.
     The static get_request() method is a utility that checks for this capability at runtime.
-    
+
     Useful for multiprocessing where the actual InferenceAPIData objects might be large
     or unpickleable, or need to be initialized in the worker process.
     """
@@ -252,12 +224,12 @@ class LazyLoadDataMixin(ABC):
     @abstractmethod
     def load_lazy_data(self, data: LazyLoadInferenceAPIData) -> InferenceAPIData:
         """Load the actual data for a lazy placeholder.
-        
+
         This method is called by worker processes to materialize lazy data.
-        
+
         Args:
             data: LazyLoadInferenceAPIData placeholder
-            
+
         Returns:
             Materialized InferenceAPIData object
         """
@@ -266,16 +238,16 @@ class LazyLoadDataMixin(ABC):
     @staticmethod
     def get_request(data_generator: BaseGenerator, data: InferenceAPIData) -> InferenceAPIData:
         """Static utility method to handle lazy loading.
-        
+
         Usage: LazyLoadDataMixin.get_request(datagen, data)
-        
+
         Checks if datagen supports lazy loading and materializes data if needed.
         Works with both DataGenerator and TraceGenerator.
-        
+
         Args:
             data_generator: The generator (DataGenerator or TraceGenerator)
             data: The data (may be lazy or already materialized)
-            
+
         Returns:
             Materialized InferenceAPIData object
         """

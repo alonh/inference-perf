@@ -397,8 +397,9 @@ def test_parallel_fan_out() -> None:
     # ROOT has no predecessors
     assert node_000.predecessor_node_ids == []
 
-    assert node_001.predecessor_node_ids == node_002.predecessor_node_ids, \
+    assert node_001.predecessor_node_ids == node_002.predecessor_node_ids, (
         "node_001 and node_002 are run in parallel and have the same predecessor"
+    )
 
     # span_FINAL should have OUTPUT segments from P1 and P2
     segs_final = node_003.call.input_segments
@@ -610,4 +611,3 @@ def test_growing_prefix() -> None:
 
 
 # Made with Bob
-
