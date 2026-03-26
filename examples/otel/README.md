@@ -13,9 +13,11 @@ Each OTel trace file contains a flat list of spans. The replayer converts them i
 acyclic graph (DAG):
 
 1. **Extract LLM spans** — spans with `gen_ai.input.messages` (or a `chat *` name) become nodes.
-2. **Infer dependencies** — if a span's input messages contain an `assistant` message whose
-   content exactly matches a predecessor span's output, a causal edge is added. Spans with no
-   causal predecessor fall back to a timing-based edge (the closest non-overlapping earlier span).
+2. **Infer dependencies** — two types of edges are added:
+   - **Causal edges**: when a span's input contains an `assistant` message whose content exactly matches a predecessor's output
+   - **Temporal edges**: to the closest non-overlapping earlier span (timing fallback)
+   
+   The temporal fallback is necessary because output matching doesn't always detect all dependencies. If node X ends before node Y begins, X is considered a predecessor even if Y doesn't use X's entire output.
 3. **Transitive reduction** — redundant edges are pruned so only direct predecessors remain.
 4. **Segment decomposition** — each node's input is split into message-level segments:
    - `shared` — leading messages identical to a predecessor (KV-cache hit opportunity)
@@ -134,8 +136,6 @@ a `spans` array. Each LLM span must include:
 }
 ```
 
-Token counts are read from `gen_ai.usage.prompt_tokens` / `gen_ai.usage.completion_tokens`
-(also accepts `input_tokens` / `output_tokens`). If absent, a 4 chars/token estimate is used.
 
 ## Architecture: how OTel replay differs from other data generators
 
