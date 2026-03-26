@@ -333,16 +333,19 @@ def main_cli() -> None:
     else:
         raise Exception("data config missing")
 
-    # Create session metrics collector for agentic workflows
-    session_metrics_collector = SessionMetricsCollector()
+    # Create session metrics collector only for agentic workflows (OTel trace replay)
+    session_metrics_collector = None
+    if config.data and config.data.type == DataGenType.OTelTraceReplay:
+        session_metrics_collector = SessionMetricsCollector()
 
     # Define LoadGenerator with session metrics collector
     if isinstance(metrics_client, PrometheusMetricsClient) and config.report.prometheus and config.report.prometheus.per_stage:
         config.load.interval = max(config.load.interval, metrics_client.scrape_interval)
     loadgen = LoadGenerator(datagen, config.load, session_metrics_collector)
 
-    # Wire session metrics collector into reportgen
-    reportgen.session_metrics_collector = session_metrics_collector
+    # Wire session metrics collector into reportgen if it exists
+    if session_metrics_collector:
+        reportgen.session_metrics_collector = session_metrics_collector
 
     # Setup Perf Test Runner
     perfrunner = InferencePerfRunner(model_server_client, loadgen, reportgen, storage_clients)
