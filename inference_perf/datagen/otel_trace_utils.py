@@ -305,7 +305,7 @@ def _extract_content_from_parts(parts: List[Dict]) -> str:
             tool_args = part.get("arguments", "{}")
             if isinstance(tool_args, dict):
                 tool_args = json.dumps(tool_args, indent=2)
-            content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_args}</tool_args></tool_call>")
+            content_parts.append(f"<|tool_call|>{tool_name}<|tool_args|>{tool_args}<|end|>")
 
         elif part_type == "tool_result":
             # Tool result
@@ -321,7 +321,7 @@ def _extract_content_from_parts(parts: List[Dict]) -> str:
             tool_input = part.get("input", {})
             if isinstance(tool_input, dict):
                 tool_input = json.dumps(tool_input, indent=2)
-            content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_input}</tool_args></tool_call>")
+            content_parts.append(f"<|tool_call|>{tool_name}<|tool_args|>{tool_input}<|end|>")
 
     return "\n".join(content_parts)
 
@@ -354,7 +354,7 @@ def _extract_content_from_list(content_list: List) -> str:
                 tool_input = item.get("input", {})
                 if isinstance(tool_input, dict):
                     tool_input = json.dumps(tool_input, indent=2)
-                content_parts.append(f"<tool_call>{tool_name}<tool_args>{tool_input}</tool_args></tool_call>")
+                content_parts.append(f"<|tool_call|>{tool_name}<|tool_args|>{tool_input}<|end|>")
 
             # Handle other dict formats
             elif "text" in item:

@@ -216,8 +216,8 @@ def extract_messages(span: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
-def extract_output_message(span: Dict[str, Any]) -> Optional[str]:
-    """Extract output text from span attributes."""
+def extract_output_message(span: Dict[str, Any]) -> Optional[OtelMessage]:
+    """Extract output message from span attributes. Returns an OtelMessage or ComplexOtelMessage object."""
     attrs = span.get("attributes") or {}
     for k in ("gen_ai.output.text", "gen_ai.completion", "gen_ai.output"):
         if k in attrs and isinstance(attrs[k], str):
@@ -291,8 +291,8 @@ def filter_duplicate_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     seen_signatures: Set[str] = set()
     unique_spans: List[Dict[str, Any]] = []
-    spans.sort(key=lambda s: s['span_id']) #to make filtering consistant between runs
-    for span in spans:
+    sorted_spans = sorted(spans, key=lambda s: s['span_id']) #to make filtering consistant between runs
+    for span in sorted_spans:
         # Create a signature for the span based on start_time, end_time, and attributes
         start_time = span.get("start_time", "")
         end_time = span.get("end_time", "")
@@ -695,18 +695,19 @@ def build_graph(
             causal_preds[i].extend(predecessor_indices[i])
 
         """
-        Always add a temporal fallback predecessor (the closest non-overlapping node).
+        Add a temporal fallback predecessor (the closest non-overlapping node) if one exists.
         This ensures we don't have long wait times when causal predecessors are distant.
         Causal detection (output matching) doesn't catch all dependencies, so we use
         temporal proximity as a conservative fallback to maintain realistic timing.
         """
-        predecessor_index = 0 #default value - the predecessor is the first node
-        # look for the closest possible predecessor. It's not necessaritly the immediate predecessor, as they can be executed in parallel
+        predecessor_index = None  # Will remain None if no valid predecessor found
+        # Look for the closest possible predecessor. It's not necessarily the immediate predecessor, as they can be executed in parallel
         for j in range(i-1, -1, -1):
             if is_valid_predecessor(calls[j], calls[i]):
                 predecessor_index = j
                 break
-        if predecessor_index not in predecessor_indices[i]: #we may have already added this node as a causal predecessor.
+        # Only add temporal predecessor if one was found and it's not already a causal predecessor
+        if predecessor_index is not None and predecessor_index not in predecessor_indices[i]:
             predecessor_indices[i].append(predecessor_index)
 
     # ---------------------------------------------------------------------------

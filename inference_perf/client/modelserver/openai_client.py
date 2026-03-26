@@ -186,6 +186,9 @@ class openAIModelServerClientSession(ModelServerClientSession):
             async with self.session.post(self.client.uri + data.get_route(), headers=headers, data=request_data) as resp:
                 response = resp
                 try:
+                    # Read response body once to avoid double-read issue
+                    response_content = await response.text()
+                    
                     if response.status == 200:
                         response_info = await data.process_response(
                             response=response,
@@ -195,16 +198,14 @@ class openAIModelServerClientSession(ModelServerClientSession):
                         )
                     else:
                         error = ErrorResponseInfo(
-                            error_msg=await response.text(),
+                            error_msg=response_content,
                             error_type=f"HTTP Error {response.status}",
                         )
-                finally:
-                    # Always try to consume the payload to return the connection to the pool
-                    try:
-                        response_content = await response.text()
-                    except Exception:
-                        if not response_content:
-                            response_content = "Failed to read response text"
+                except Exception as read_error:
+                    # Handle errors reading response body
+                    if not response_content:
+                        response_content = f"Failed to read response text: {read_error}"
+                    raise
 
         except aiohttp.ClientError as e:
             caught_exception = e
