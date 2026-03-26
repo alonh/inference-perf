@@ -990,18 +990,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
             f"{len(self.sessions)} sessions (graph-based traversal)"
         )
 
-    def _activate_session(self, session_id: str) -> None:
-        """Activate a session by marking it active and enabling root nodes."""
-        state = self.session_graph_state[session_id]
-        state.is_active = True
-        self.active_session_ids.add(session_id)
-
-        # Find and activate root nodes (no predecessors)
-        root_nodes = {node_id for node_id, node in state.graph.nodes.items() if not node.predecessor_node_ids}
-        state.ready_nodes.update(root_nodes)
-
-        logger.info(f"Activated session {session_id} with {len(root_nodes)} root nodes")
-
     def _get_effective_model(self, recorded_model: str) -> str:
         """Get the effective model name for a request."""
         if self.otel_config.use_static_model:
@@ -1013,27 +1001,6 @@ class OTelTraceReplayDataGenerator(TraceGenerator, LazyLoadDataMixin):
                 return self.otel_config.model_mapping.get(recorded_model, recorded_model)
             return recorded_model
 
-    def get_request_count(self) -> int:
-        """Return total number of requests to replay from active sessions only.
-
-        Only counts events from currently active sessions, not pending ones.
-        Pending sessions will be activated later and their events yielded in subsequent calls.
-        """
-        # Count events from active sessions only
-        total_events = 0
-
-        for session_id in self.active_session_ids:
-            state = self.session_graph_state.get(session_id)
-            if state:
-                total_events += len(state.graph.nodes)
-
-        logger.info(
-            f"get_request_count: {total_events} events from "
-            f"{len(self.active_session_ids)} active session(s) "
-            f"({len(self.pending_session_ids)} pending)"
-        )
-
-        return total_events
 
     def get_supported_apis(self) -> List[APIType]:
         """Return supported API types."""
