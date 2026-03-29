@@ -26,7 +26,7 @@ Environment Variables:
 
 import logging
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from contextlib import contextmanager
 
 try:
@@ -35,6 +35,7 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
     from opentelemetry.semconv_ai import SpanAttributes
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
     
     OTEL_AVAILABLE = True
 except ImportError:
@@ -42,6 +43,7 @@ except ImportError:
     trace = None  # type: ignore
     Span = None  # type: ignore
     SpanAttributes = None  # type: ignore
+    TraceContextTextMapPropagator = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,7 @@ class OTelInstrumentation:
         operation_name: str,
         model_name: str,
         request_data: Optional[Dict[str, Any]] = None,
+        parent_context: Optional[Dict[str, str]] = None,
     ):
         """
         Context manager for tracing LLM requests.
@@ -161,6 +164,7 @@ class OTelInstrumentation:
             operation_name: Name of the operation (e.g., "chat.completions", "completions")
             model_name: Name of the model being used
             request_data: Optional request data for additional context
+            parent_context: Optional serialized parent context for linking spans
             
         Yields:
             Span object if OTEL is enabled, None otherwise
@@ -169,9 +173,20 @@ class OTelInstrumentation:
             yield None
             return
         
+        # Extract parent context if provided
+        ctx = None
+        if parent_context and TraceContextTextMapPropagator:
+            try:
+                propagator = TraceContextTextMapPropagator()
+                ctx = propagator.extract(parent_context)
+            except Exception as e:
+                logger.warning(f"Failed to extract parent context: {e}")
+                ctx = None
+        
         with self.tracer.start_as_current_span(
             f"llm.{operation_name}",
-            kind=trace.SpanKind.CLIENT
+            kind=trace.SpanKind.CLIENT,
+            context=ctx
         ) as span:
             try:
                 # Set standard GenAI attributes using semantic conventions
@@ -262,6 +277,71 @@ class OTelInstrumentation:
                 
         except Exception as e:
             logger.warning(f"Failed to record response metrics: {e}")
+    
+    def start_session_span(
+        self,
+        session_id: str,
+        session_info: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[Any], Optional[Dict[str, str]]]:
+        """
+        Start a session-level span and return both the span and its serialized context.
+        
+        Args:
+            session_id: Unique identifier for the session
+            session_info: Optional metadata about the session (num_nodes, file_path, etc.)
+            
+        Returns:
+            Tuple of (span, context_dict) where:
+            - span: The OTEL span object (or None if OTEL disabled)
+            - context_dict: Serialized context for cross-process propagation (or None)
+        """
+        if not self.enabled or self.tracer is None:
+            return None, None
+        
+        # Start the session span
+        span = self.tracer.start_span(
+            f"session.{session_id}",
+            kind=trace.SpanKind.INTERNAL
+        )
+        
+        # Set session attributes
+        if session_info:
+            if "num_nodes" in session_info:
+                span.set_attribute("session.num_nodes", session_info["num_nodes"])
+            if "file_path" in session_info:
+                span.set_attribute("session.file_path", session_info["file_path"])
+        
+        span.set_attribute("session.id", session_id)
+        
+        # Serialize the span context for cross-process propagation
+        context_dict: Dict[str, str] = {}
+        if TraceContextTextMapPropagator:
+            propagator = TraceContextTextMapPropagator()
+            # Create a context with this span as current
+            ctx = trace.set_span_in_context(span)
+            propagator.inject(context_dict, context=ctx)
+        
+        return span, context_dict
+    
+    def end_session_span(self, span: Optional[Any], error: Optional[str] = None) -> None:
+        """
+        End a session span.
+        
+        Args:
+            span: The OTEL span to end
+            error: Optional error message if session failed
+        """
+        if not self.enabled or span is None:
+            return
+        
+        try:
+            if error:
+                span.set_status(Status(StatusCode.ERROR, error))
+            else:
+                span.set_status(Status(StatusCode.OK))
+            span.end()
+        except Exception as e:
+            logger.warning(f"Failed to end session span: {e}")
 
 
 # Global instance

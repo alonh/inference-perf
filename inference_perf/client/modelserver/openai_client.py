@@ -193,11 +193,17 @@ class openAIModelServerClientSession(ModelServerClientSession):
         response_content = ""
         caught_exception: Optional[Exception] = None
 
+        # Get session OTEL context if available (for OTel trace replay)
+        parent_context = None
+        if hasattr(data, 'get_session_otel_context'):
+            parent_context = data.get_session_otel_context()
+
         # Start OTEL tracing
         with self.client.otel.trace_llm_request(
             operation_name=operation_name,
             model_name=effective_model_name,
             request_data=payload,
+            parent_context=parent_context,
         ) as span:
             try:
                 async with self.session.post(self.client.uri + data.get_route(), headers=headers, data=request_data) as resp:
