@@ -27,7 +27,7 @@ load:
 
 server:
   type: vllm
-  base_url: "http://localhost:8000"
+  base_url: "http://localhost:8888"
   model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 storage:

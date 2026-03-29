@@ -38,6 +38,7 @@ class vLLMModelServerClient(openAIModelServerClient):
         cert_path: Optional[str] = None,
         key_path: Optional[str] = None,
         lora_config: Optional[List[MultiLoRAConfig]] = None,
+        enable_otel: bool = True,
     ) -> None:
         super().__init__(
             metrics_collector,
@@ -53,6 +54,7 @@ class vLLMModelServerClient(openAIModelServerClient):
             cert_path,
             key_path,
             lora_config=lora_config,
+            enable_otel=enable_otel,
         )
         self.metric_filters = [f"model_name='{model_name}'", *additional_filters]
 
