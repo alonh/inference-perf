@@ -412,6 +412,22 @@ class LoadGenerator:
         # Cache OTEL instrumentation to avoid redundant calls
         otel_instr = get_otel_instrumentation()
         session_spans: Dict[str, object] = {}  # session_id → OTEL span object
+        stage_span = None  # Stage-level span (if trace_per_stage is enabled)
+        stage_context_dict = None  # Stage-level context for propagation
+
+        # Start stage-level span if trace_per_stage is enabled
+        if otel_instr.trace_per_stage:
+            stage_info = {
+                "num_sessions": effective_num_sessions,
+                "concurrent_sessions": concurrent_sessions,
+            }
+            if session_rate is not None:
+                stage_info["session_rate"] = session_rate
+            if timeout is not None:
+                stage_info["timeout"] = timeout
+            
+            stage_span, stage_context_dict = otel_instr.start_stage_span(stage_id, stage_info)
+            logger.info(f"Started stage-level OTEL span for stage {stage_id}")
 
         # Track dispatch timing
         sessions_dispatched = 0
@@ -457,8 +473,9 @@ class LoadGenerator:
                 f"({len(active_session_indices)} active, {len(pending_session_indices)} pending)"
             )
 
-            # Start OTEL session span if available (using cached otel_instr)
-            span, context_dict = otel_instr.start_session_span(session_id, session_info)
+            # Start OTEL session span (as child of stage span if trace_per_stage is enabled)
+            parent_ctx = stage_context_dict if otel_instr.trace_per_stage else None
+            span, context_dict = otel_instr.start_session_span(session_id, session_info, parent_ctx)
             if span is not None:
                 session_spans[session_id] = span
             
@@ -633,6 +650,12 @@ class LoadGenerator:
         # Clear the request_phase event to force worker gather
         request_phase.clear()
         request_queue.join()
+
+        # End stage-level span if trace_per_stage is enabled
+        if stage_span is not None:
+            error_msg = None if stage_status == StageStatus.COMPLETED else "Stage failed or timed out"
+            otel_instr.end_stage_span(stage_span, error_msg)
+            logger.info(f"Ended stage-level OTEL span for stage {stage_id}")
 
         self.stage_runtime_info[stage_id] = StageRuntimeInfo(
             stage_id=stage_id,

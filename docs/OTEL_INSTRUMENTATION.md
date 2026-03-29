@@ -46,6 +46,10 @@ OTEL instrumentation is controlled via environment variables. Tracing is **disab
   - If not set, traces are exported to console (stdout)
   - If set, traces are exported via OTLP to the specified endpoint
 - `OTEL_SERVICE_NAME`: Service name for tracing (default: `"inference-perf"`)
+- `OTEL_TRACE_PER_STAGE`: Set to `"true"` to create one trace per stage instead of per session (default: `"false"`)
+  - When enabled, all sessions within a stage are grouped under a single stage-level trace
+  - Session spans are created as children of the stage span
+  - Useful for viewing all sessions in a stage together in trace visualization tools
 
 ## Usage
 

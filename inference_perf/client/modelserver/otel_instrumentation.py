@@ -22,6 +22,7 @@ Environment Variables:
     OTEL_TRACES_ENABLED: Set to "true" to enable OTEL tracing (default: false)
     OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
     OTEL_SERVICE_NAME: Service name for tracing (default: "inference-perf")
+    OTEL_TRACE_PER_STAGE: Set to "true" to create one trace per stage instead of per session (default: false)
 """
 
 import logging
@@ -63,11 +64,13 @@ class OTelInstrumentation:
         - OTEL_TRACES_ENABLED: Set to "true" to enable tracing (default: false)
         - OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint (e.g., "http://localhost:4317")
         - OTEL_SERVICE_NAME: Service name (default: "inference-perf")
+        - OTEL_TRACE_PER_STAGE: Set to "true" to create one trace per stage instead of per session (default: false)
         """
         # Read configuration from environment variables
         enabled = os.getenv("OTEL_TRACES_ENABLED", "false").lower() == "true"
         self.service_name = os.getenv("OTEL_SERVICE_NAME", "inference-perf")
         self.otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        self.trace_per_stage = os.getenv("OTEL_TRACE_PER_STAGE", "false").lower() == "true"
         
         self.enabled = enabled and OTEL_AVAILABLE
         self.tracer: Optional[Any] = None
@@ -282,6 +285,7 @@ class OTelInstrumentation:
         self,
         session_id: str,
         session_info: Optional[Dict[str, Any]] = None,
+        parent_context: Optional[Dict[str, str]] = None,
     ) -> Tuple[Optional[Any], Optional[Dict[str, str]]]:
         """
         Start a session-level span and return both the span and its serialized context.
@@ -289,6 +293,7 @@ class OTelInstrumentation:
         Args:
             session_id: Unique identifier for the session
             session_info: Optional metadata about the session (num_nodes, file_path, etc.)
+            parent_context: Optional serialized parent context for linking spans
             
         Returns:
             Tuple of (span, context_dict) where:
@@ -298,11 +303,28 @@ class OTelInstrumentation:
         if not self.enabled or self.tracer is None:
             return None, None
         
-        # Start the session span
-        span = self.tracer.start_span(
-            f"session.{session_id}",
-            kind=trace.SpanKind.INTERNAL
-        )
+        # Extract parent context if provided
+        ctx = None
+        if parent_context and TraceContextTextMapPropagator:
+            try:
+                propagator = TraceContextTextMapPropagator()
+                ctx = propagator.extract(parent_context)
+            except Exception as e:
+                logger.warning(f"Failed to extract parent context: {e}")
+                ctx = None
+        
+        # Start the session span with optional parent context
+        if ctx:
+            span = self.tracer.start_span(
+                f"session.{session_id}",
+                kind=trace.SpanKind.INTERNAL,
+                context=ctx
+            )
+        else:
+            span = self.tracer.start_span(
+                f"session.{session_id}",
+                kind=trace.SpanKind.INTERNAL
+            )
         
         # Set session attributes
         if session_info:
@@ -312,6 +334,54 @@ class OTelInstrumentation:
                 span.set_attribute("session.file_path", session_info["file_path"])
         
         span.set_attribute("session.id", session_id)
+        
+        # Serialize the span context for cross-process propagation
+        context_dict: Dict[str, str] = {}
+        if TraceContextTextMapPropagator:
+            propagator = TraceContextTextMapPropagator()
+            # Create a context with this span as current
+            ctx = trace.set_span_in_context(span)
+            propagator.inject(context_dict, context=ctx)
+        
+        return span, context_dict
+    
+    def start_stage_span(
+        self,
+        stage_id: int,
+        stage_info: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[Any], Optional[Dict[str, str]]]:
+        """
+        Start a stage-level span and return both the span and its serialized context.
+        
+        Args:
+            stage_id: Unique identifier for the stage
+            stage_info: Optional metadata about the stage (num_sessions, duration, etc.)
+            
+        Returns:
+            Tuple of (span, context_dict) where:
+            - span: The OTEL span object (or None if OTEL disabled)
+            - context_dict: Serialized context for cross-process propagation (or None)
+        """
+        if not self.enabled or self.tracer is None:
+            return None, None
+        
+        # Start the stage span
+        span = self.tracer.start_span(
+            f"stage.{stage_id}",
+            kind=trace.SpanKind.INTERNAL
+        )
+        
+        # Set stage attributes
+        span.set_attribute("stage.id", stage_id)
+        if stage_info:
+            if "num_sessions" in stage_info:
+                span.set_attribute("stage.num_sessions", stage_info["num_sessions"])
+            if "duration" in stage_info:
+                span.set_attribute("stage.duration", stage_info["duration"])
+            if "rate" in stage_info:
+                span.set_attribute("stage.rate", stage_info["rate"])
+            if "concurrent_sessions" in stage_info:
+                span.set_attribute("stage.concurrent_sessions", stage_info["concurrent_sessions"])
         
         # Serialize the span context for cross-process propagation
         context_dict: Dict[str, str] = {}
@@ -342,6 +412,26 @@ class OTelInstrumentation:
             span.end()
         except Exception as e:
             logger.warning(f"Failed to end session span: {e}")
+    
+    def end_stage_span(self, span: Optional[Any], error: Optional[str] = None) -> None:
+        """
+        End a stage span.
+        
+        Args:
+            span: The OTEL span to end
+            error: Optional error message if stage failed
+        """
+        if not self.enabled or span is None:
+            return
+        
+        try:
+            if error:
+                span.set_status(Status(StatusCode.ERROR, error))
+            else:
+                span.set_status(Status(StatusCode.OK))
+            span.end()
+        except Exception as e:
+            logger.warning(f"Failed to end stage span: {e}")
 
 
 # Global instance
