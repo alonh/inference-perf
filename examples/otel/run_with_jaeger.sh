@@ -17,7 +17,10 @@
 #    pip install opentelemetry-exporter-otlp-proto-grpc
 #
 # Usage:
-#    ./examples/otel/run_with_jaeger.sh
+#    ./examples/otel/run_with_jaeger.sh <config_file>
+#
+# Arguments:
+#    config_file: Path to the configuration file (required)
 
 # Set OpenTelemetry environment variables
 export OTEL_TRACES_ENABLED="true"
@@ -46,8 +49,31 @@ if ! curl -s http://localhost:16686 > /dev/null 2>&1; then
     echo ""
 fi
 
+# Check if config file argument is provided
+if [ -z "$1" ]; then
+    echo "❌ Error: Config file parameter is required"
+    echo ""
+    echo "Usage: $0 <config_file>"
+    echo ""
+    echo "Example:"
+    echo "  $0 examples/otel/configs/per_case_config/simple_chain.yml"
+    echo ""
+    exit 1
+fi
+
+CONFIG_FILE="$1"
+
+# Check if config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ Error: Config file not found: $CONFIG_FILE"
+    exit 1
+fi
+
+echo "Using config file: $CONFIG_FILE"
+echo ""
+
 # Run inference-perf
-python -m inference_perf.main --config examples/otel/configs/per_case_config/simple_chain.yml
+python -m inference_perf.main --config "$CONFIG_FILE"
 
 echo ""
 echo "=================================================="
