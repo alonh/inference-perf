@@ -17,9 +17,15 @@ OpenTelemetry instrumentation for LLM API calls.
 
 This module provides standard GenAI OTEL instrumentation following the
 OpenTelemetry Semantic Conventions for GenAI operations.
+
+Environment Variables:
+    OTEL_TRACES_ENABLED: Set to "true" to enable OTEL tracing (default: false)
+    OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
+    OTEL_SERVICE_NAME: Service name for tracing (default: "inference-perf")
 """
 
 import logging
+import os
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 
@@ -47,36 +53,34 @@ class OTelInstrumentation:
     Provides tracing capabilities following GenAI semantic conventions.
     """
     
-    def __init__(
-        self,
-        service_name: str = "inference-perf",
-        enabled: bool = True,
-        otlp_endpoint: Optional[str] = None,
-    ):
+    def __init__(self):
         """
         Initialize OTEL instrumentation.
         
-        Args:
-            service_name: Name of the service for tracing
-            enabled: Whether to enable OTEL instrumentation
-            otlp_endpoint: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
-                          If None, uses console exporter. If set, uses OTLP exporter.
+        Reads configuration from environment variables:
+        - OTEL_TRACES_ENABLED: Set to "true" to enable tracing (default: false)
+        - OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint (e.g., "http://localhost:4317")
+        - OTEL_SERVICE_NAME: Service name (default: "inference-perf")
         """
+        # Read configuration from environment variables
+        enabled = os.getenv("OTEL_TRACES_ENABLED", "false").lower() == "true"
+        self.service_name = os.getenv("OTEL_SERVICE_NAME", "inference-perf")
+        self.otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        
         self.enabled = enabled and OTEL_AVAILABLE
-        self.service_name = service_name
-        self.otlp_endpoint = otlp_endpoint
         self.tracer: Optional[Any] = None
         
         if not OTEL_AVAILABLE and enabled:
             logger.warning(
                 "OpenTelemetry packages not installed. "
                 "Install with: pip install opentelemetry-api opentelemetry-sdk "
-                "opentelemetry-instrumentation-aiohttp-client opentelemetry-semantic-conventions-ai"
+                "opentelemetry-exporter-otlp-proto-grpc opentelemetry-semantic-conventions-ai"
             )
             self.enabled = False
         
         if self.enabled:
             self._setup_tracer()
+            logger.info(f"OTEL tracing enabled for service: {self.service_name}")
     
     def _setup_tracer(self) -> None:
         """Set up the OpenTelemetry tracer."""
@@ -264,18 +268,14 @@ class OTelInstrumentation:
 _global_instrumentation: Optional[OTelInstrumentation] = None
 
 
-def get_otel_instrumentation(
-    service_name: str = "inference-perf",
-    enabled: bool = True,
-    otlp_endpoint: Optional[str] = None,
-) -> OTelInstrumentation:
+def get_otel_instrumentation() -> OTelInstrumentation:
     """
     Get or create the global OTEL instrumentation instance.
     
-    Args:
-        service_name: Name of the service for tracing
-        enabled: Whether to enable OTEL instrumentation
-        otlp_endpoint: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
+    Configuration is read from environment variables:
+    - OTEL_TRACES_ENABLED: Set to "true" to enable tracing
+    - OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint (e.g., "http://localhost:4317")
+    - OTEL_SERVICE_NAME: Service name (default: "inference-perf")
         
     Returns:
         OTelInstrumentation instance
@@ -283,38 +283,8 @@ def get_otel_instrumentation(
     global _global_instrumentation
     
     if _global_instrumentation is None:
-        # Check environment variable for OTLP endpoint
-        import os
-        if otlp_endpoint is None:
-            otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        
-        _global_instrumentation = OTelInstrumentation(
-            service_name=service_name,
-            enabled=enabled,
-            otlp_endpoint=otlp_endpoint,
-        )
+        _global_instrumentation = OTelInstrumentation()
     
     return _global_instrumentation
-
-
-def configure_otel(
-    service_name: str = "inference-perf",
-    enabled: bool = True,
-    otlp_endpoint: Optional[str] = None,
-) -> None:
-    """
-    Configure global OTEL instrumentation.
-    
-    Args:
-        service_name: Name of the service for tracing
-        enabled: Whether to enable OTEL instrumentation
-        otlp_endpoint: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
-    """
-    global _global_instrumentation
-    _global_instrumentation = OTelInstrumentation(
-        service_name=service_name,
-        enabled=enabled,
-        otlp_endpoint=otlp_endpoint,
-    )
 
 # Made with Bob

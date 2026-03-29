@@ -20,6 +20,7 @@
 #    ./examples/otel/run_with_jaeger.sh
 
 # Set OpenTelemetry environment variables
+export OTEL_TRACES_ENABLED="true"
 export OTEL_SERVICE_NAME="inference-perf"
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"

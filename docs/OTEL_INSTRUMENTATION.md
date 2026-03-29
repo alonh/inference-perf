@@ -13,11 +13,12 @@ The OTEL instrumentation provides distributed tracing capabilities for LLM infer
 - **Rich span attributes** including:
   - Model name and operation type
   - Request parameters (max_tokens, temperature, top_p, streaming)
+  - Input messages and output text
   - Token usage (input/output tokens)
   - Latency metrics (TTFT, TPOT, total latency)
-  - Finish reasons and response IDs
-  - Error information
+  - Finish reasons and error information
 - **Support for all model servers**: vLLM, SGlang, TGI, and any OpenAI-compatible API
+- **Environment-based configuration**: No code changes required
 - **Graceful degradation**: Works without OTEL packages installed (disabled mode)
 
 ## Installation
@@ -25,7 +26,7 @@ The OTEL instrumentation provides distributed tracing capabilities for LLM infer
 Install the required OpenTelemetry packages:
 
 ```bash
-pip install opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-aiohttp-client opentelemetry-semantic-conventions-ai
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc opentelemetry-semantic-conventions-ai
 ```
 
 Or install inference-perf with all dependencies:
@@ -34,201 +35,140 @@ Or install inference-perf with all dependencies:
 pip install -e .
 ```
 
-## Usage
+## Configuration
 
-### Basic Usage
-
-OTEL instrumentation is **enabled by default** for all model server clients. No configuration changes are required.
-
-```python
-from inference_perf.client.modelserver.vllm_client import vLLMModelServerClient
-
-# OTEL instrumentation is automatically enabled
-client = vLLMModelServerClient(
-    metrics_collector=collector,
-    api_config=config,
-    uri="http://localhost:8000",
-    model_name="meta-llama/Llama-2-7b-hf",
-    # ... other parameters
-)
-```
-
-### Disabling OTEL
-
-To disable OTEL instrumentation:
-
-```python
-client = vLLMModelServerClient(
-    # ... other parameters
-    enable_otel=False,  # Disable OTEL tracing
-)
-```
-
-### Configuring OTEL Exporter
-
-By default, traces are exported to the console. To export to an OTLP endpoint (e.g., Jaeger, Tempo):
-
-```python
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-
-# Configure OTLP exporter
-provider = TracerProvider()
-otlp_exporter = OTLPSpanExporter(
-    endpoint="http://localhost:4317",  # Your OTLP endpoint
-    insecure=True,
-)
-provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-trace.set_tracer_provider(provider)
-
-# Now create your client - it will use the configured provider
-client = vLLMModelServerClient(...)
-```
+OTEL instrumentation is controlled via environment variables. Tracing is **disabled by default** and must be explicitly enabled.
 
 ### Environment Variables
 
-You can also configure OTEL using environment variables:
+- `OTEL_TRACES_ENABLED`: Set to `"true"` to enable OTEL tracing (default: `"false"`)
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint for exporting traces (e.g., `http://localhost:4317`)
+  - If not set, traces are exported to console (stdout)
+  - If set, traces are exported via OTLP to the specified endpoint
+- `OTEL_SERVICE_NAME`: Service name for tracing (default: `"inference-perf"`)
+
+## Usage
+
+### Enable Tracing
+
+To enable OTEL tracing, set the `OTEL_TRACES_ENABLED` environment variable:
 
 ```bash
-# OTLP endpoint
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-
-# Service name
-export OTEL_SERVICE_NAME=inference-perf
-
-# Sampling rate (0.0 to 1.0)
-export OTEL_TRACES_SAMPLER=traceidratio
-export OTEL_TRACES_SAMPLER_ARG=0.1  # Sample 10% of traces
+export OTEL_TRACES_ENABLED="true"
+python -m inference_perf.main --config config.yml
 ```
 
-## Span Attributes
+### Console Output
 
-The following span attributes are recorded for each LLM request:
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, traces are printed to console in JSON format:
 
-### Request Attributes
-
-- `gen_ai.system`: Always set to "openai_compatible"
-- `gen_ai.request.model`: Model name being used
-- `gen_ai.operation.name`: Operation type (e.g., "chat.completions", "completions")
-- `gen_ai.request.max_tokens`: Maximum tokens to generate
-- `gen_ai.request.temperature`: Temperature parameter (if set)
-- `gen_ai.request.top_p`: Top-p parameter (if set)
-- `gen_ai.request.stream`: Whether streaming is enabled
-
-### Response Attributes
-
-- `gen_ai.usage.input_tokens`: Number of input tokens
-- `gen_ai.usage.output_tokens`: Number of output tokens
-- `gen_ai.response.time_to_first_token`: Time to first token (seconds)
-- `gen_ai.response.time_per_output_token`: Average time per output token (seconds)
-- `gen_ai.response.total_latency`: Total request latency (seconds)
-- `gen_ai.response.finish_reason`: Reason for completion (e.g., "stop", "length")
-- `gen_ai.response.id`: Response ID from the API
-
-### Error Attributes
-
-- `gen_ai.response.error`: Error message (if request failed)
-- Span status set to ERROR with exception details
-
-## Example: Viewing Traces in Jaeger
-
-1. Start Jaeger:
 ```bash
+export OTEL_TRACES_ENABLED="true"
+python -m inference_perf.main --config config.yml
+```
+
+### Export to OTLP Endpoint
+
+To export traces to an OTLP endpoint (e.g., Jaeger, Tempo, Grafana Cloud):
+
+```bash
+export OTEL_TRACES_ENABLED="true"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+export OTEL_SERVICE_NAME="my-inference-service"
+python -m inference_perf.main --config config.yml
+```
+
+### Using with Jaeger
+
+See [examples/otel/README_JAEGER.md](../examples/otel/README_JAEGER.md) for detailed instructions on using OTEL with Jaeger.
+
+Quick start:
+
+```bash
+# Start Jaeger
 docker run -d --name jaeger \
   -e COLLECTOR_OTLP_ENABLED=true \
   -p 16686:16686 \
   -p 4317:4317 \
   jaegertracing/all-in-one:latest
+
+# Run with tracing enabled
+export OTEL_TRACES_ENABLED="true"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+python -m inference_perf.main --config config.yml
+
+# View traces at http://localhost:16686
 ```
 
-2. Configure inference-perf to export to Jaeger:
-```python
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry import trace
+## Span Attributes
 
-provider = TracerProvider()
-otlp_exporter = OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)
-provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-trace.set_tracer_provider(provider)
-```
+The following GenAI semantic convention attributes are captured:
 
-3. Run your benchmark
+### Request Attributes
+- `gen_ai.system`: System identifier (e.g., "openai_compatible")
+- `gen_ai.request.model`: Model name
+- `gen_ai.request.max_tokens`: Maximum tokens to generate
+- `gen_ai.request.temperature`: Sampling temperature
+- `gen_ai.input.messages`: Input messages as JSON string
 
-4. View traces at http://localhost:16686
+### Response Attributes
+- `gen_ai.output.text`: Generated text
+- `gen_ai.usage.prompt_tokens`: Number of input tokens
+- `gen_ai.usage.completion_tokens`: Number of output tokens
+- `gen_ai.response.total_latency`: Total request latency
+- `gen_ai.response.time_to_first_token`: Time to first token (TTFT)
+- `gen_ai.response.time_per_output_token`: Time per output token (TPOT)
+- `gen_ai.response.finish_reason`: Reason for completion
+
+### Additional Attributes
+- `llm.request.type`: Operation type (e.g., "chat.completions")
+- `llm.is_streaming`: Whether the request is streaming
+- `llm.usage.total_tokens`: Total tokens (input + output)
 
 ## Architecture
 
-The OTEL instrumentation is implemented in three layers:
+The OTEL instrumentation is implemented in `inference_perf/client/modelserver/otel_instrumentation.py` and automatically integrated into all model server clients:
 
-1. **`otel_instrumentation.py`**: Core instrumentation module
-   - `OTelInstrumentation` class for managing tracing
-   - Context manager for creating spans
-   - Methods for recording metrics
+- `openai_client.py`: Base OpenAI-compatible client
+- `vllm_client.py`: vLLM-specific client
+- `sglang_client.py`: SGlang-specific client
+- `tgi_client.py`: TGI-specific client
 
-2. **`openai_client.py`**: Base client with OTEL integration
-   - Initializes OTEL instrumentation
-   - Wraps API calls with tracing spans
-   - Records request/response metrics
-
-3. **Model-specific clients**: Inherit OTEL support
-   - `vllm_client.py`
-   - `sglang_client.py`
-   - `tgi_client.py`
-
-## Performance Impact
-
-The OTEL instrumentation has minimal performance impact:
-
-- **Disabled mode**: Zero overhead when OTEL packages are not installed
-- **Enabled mode**: ~1-2% overhead for span creation and attribute recording
-- **Async-friendly**: Uses context managers and doesn't block request processing
+All clients automatically use the global OTEL instrumentation instance, which is configured via environment variables.
 
 ## Troubleshooting
 
-### OTEL packages not found
-
-If you see warnings about missing OTEL packages:
-
-```
-OpenTelemetry packages not installed. Install with: pip install opentelemetry-api ...
-```
-
-Install the required packages or disable OTEL with `enable_otel=False`.
-
 ### Traces not appearing
 
-1. Check that your OTLP endpoint is reachable
-2. Verify the endpoint URL is correct
-3. Check for firewall/network issues
-4. Enable debug logging:
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
+1. Verify OTEL is enabled:
+   ```bash
+   echo $OTEL_TRACES_ENABLED  # Should be "true"
+   ```
+
+2. Check OTLP endpoint is accessible:
+   ```bash
+   curl http://localhost:4317
+   ```
+
+3. Look for OTEL initialization messages in logs:
+   ```
+   INFO - OTEL tracing enabled for service: inference-perf
+   INFO - Created OTEL tracer provider with OTLP exporter to http://localhost:4317
+   ```
+
+### Missing attributes
+
+Ensure you're using the latest version of `opentelemetry-semantic-conventions-ai`:
+
+```bash
+pip install --upgrade opentelemetry-semantic-conventions-ai
 ```
 
-### High cardinality warnings
+## Examples
 
-If you see warnings about high cardinality attributes, consider:
-- Reducing sampling rate
-- Filtering sensitive attributes
-- Using span processors to drop unnecessary attributes
+See the `examples/otel/` directory for complete examples:
 
-## Future Enhancements
-
-Potential improvements for future versions:
-
-- [ ] Support for custom span processors
-- [ ] Integration with OpenTelemetry metrics
-- [ ] Automatic correlation with Prometheus metrics
-- [ ] Support for W3C Trace Context propagation
-- [ ] Custom semantic conventions for inference-perf specific attributes
-
-## References
-
-- [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
-- [GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- [Python OpenTelemetry SDK](https://opentelemetry-python.readthedocs.io/)
+- `examples/otel/configs/`: Example configuration files
+- `examples/otel/test_traces/`: Sample trace data
+- `examples/otel/run_with_jaeger.sh`: Script to run with Jaeger
+- `examples/otel/README_JAEGER.md`: Detailed Jaeger integration guide

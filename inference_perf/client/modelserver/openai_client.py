@@ -50,7 +50,6 @@ class openAIModelServerClient(ModelServerClient):
         cert_path: Optional[str] = None,
         key_path: Optional[str] = None,
         lora_config: Optional[List[MultiLoRAConfig]] = None,
-        enable_otel: bool = True,
     ) -> None:
         super().__init__(api_config, timeout)
         self.uri = uri
@@ -64,8 +63,8 @@ class openAIModelServerClient(ModelServerClient):
         self.key_path = key_path
         self.lora_config = lora_config
         
-        # Initialize OTEL instrumentation
-        self.otel = get_otel_instrumentation(enabled=enable_otel)
+        # Initialize OTEL instrumentation (configured via environment variables)
+        self.otel = get_otel_instrumentation()
 
         if model_name is None:
             supported_models = self.get_supported_models()
