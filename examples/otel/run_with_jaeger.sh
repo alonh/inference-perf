@@ -13,8 +13,9 @@
 #      -p 4318:4318 \
 #      jaegertracing/all-in-one:latest
 #
-# 2. Install OTLP exporter:
-#    pip install opentelemetry-exporter-otlp-proto-grpc
+# 2. Install otel support:
+#    
+#     pip install -e ".[otel]"
 #
 # Usage:
 #    ./examples/otel/run_with_jaeger.sh <config_file>

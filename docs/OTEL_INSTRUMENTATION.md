@@ -23,16 +23,9 @@ The OTEL instrumentation provides distributed tracing capabilities for LLM infer
 
 ## Installation
 
-Install the required OpenTelemetry packages:
 
 ```bash
-pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc opentelemetry-semantic-conventions-ai
-```
-
-Or install inference-perf with all dependencies:
-
-```bash
-pip install -e .
+pip install -e ".[otel]"
 ```
 
 ## Configuration
