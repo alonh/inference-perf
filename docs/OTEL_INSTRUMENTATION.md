@@ -8,7 +8,7 @@ The OTEL instrumentation provides distributed tracing capabilities for LLM infer
 
 ## Features
 
-- **Automatic tracing** of all LLM API calls (chat completions, completions)
+- **Automatic tracing** of all LLM API calls (chat completions, completions) in inference-perf workloads
 - **Standard GenAI semantic conventions** for consistent observability
 - **Rich span attributes** including:
   - Model name and operation type
@@ -77,25 +77,61 @@ python -m inference_perf.main --config config.yml
 
 ### Using with Jaeger
 
-See [examples/otel/README_JAEGER.md](../examples/otel/README_JAEGER.md) for detailed instructions on using OTEL with Jaeger.
+#### 1. Start Jaeger
 
-Quick start:
+Start Jaeger with OTLP support using Docker:
 
 ```bash
-# Start Jaeger
 docker run -d --name jaeger \
   -e COLLECTOR_OTLP_ENABLED=true \
   -p 16686:16686 \
   -p 4317:4317 \
+  -p 4318:4318 \
   jaegertracing/all-in-one:latest
+```
 
-# Run with tracing enabled
+Verify Jaeger is running by opening http://localhost:16686 in your browser.
+
+#### 2. Run with Jaeger
+
+**Option A: Using environment variables**
+
+```bash
 export OTEL_TRACES_ENABLED="true"
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 python -m inference_perf.main --config config.yml
-
-# View traces at http://localhost:16686
 ```
+
+**Option B: Using the provided script**
+
+```bash
+chmod +x examples/otel/run_with_jaeger.sh
+./examples/otel/run_with_jaeger.sh
+```
+
+#### 3. View Traces
+
+Open Jaeger UI at http://localhost:16686 and:
+1. Select "inference-perf" from the Service dropdown
+2. Click "Find Traces"
+3. Click on a trace to see detailed span information
+
+#### Example Queries in Jaeger
+
+**Find slow requests:**
+1. In Jaeger UI, go to "Search" tab
+2. Select service: "inference-perf"
+3. Set "Min Duration" to filter slow traces
+4. Click "Find Traces"
+
+**Analyze token usage:**
+1. Click on a trace
+2. Expand the span details
+3. Look for `gen_ai.usage.*` attributes
+
+**Compare models:**
+1. Search for traces with different `gen_ai.request.model` values
+2. Compare latency and token usage
 
 ## Span Attributes
 
@@ -133,39 +169,84 @@ The OTEL instrumentation is implemented in `inference_perf/client/modelserver/ot
 
 All clients automatically use the global OTEL instrumentation instance, which is configured via environment variables.
 
+## Advanced Configuration
+
+### Custom OTLP Endpoint
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://my-otel-collector:4317"
+python -m inference_perf.main --config your_config.yml
+```
+
+### Sampling
+
+To reduce trace volume, configure sampling:
+
+```bash
+# Sample 10% of traces
+export OTEL_TRACES_SAMPLER="traceidratio"
+export OTEL_TRACES_SAMPLER_ARG="0.1"
+```
+
+### Integration with Other Tools
+
+**Grafana Tempo:**
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://tempo:4317"
+```
+
+**Honeycomb:**
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.honeycomb.io:443"
+export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=YOUR_API_KEY"
+```
+
+**AWS X-Ray:**
+Use the AWS Distro for OpenTelemetry (ADOT) Collector as an intermediary.
+
 ## Troubleshooting
 
-### Traces not appearing
+### Traces not appearing in Jaeger
 
-1. Verify OTEL is enabled:
+1. **Check Jaeger is running:**
    ```bash
-   echo $OTEL_TRACES_ENABLED  # Should be "true"
+   curl http://localhost:16686
    ```
 
-2. Check OTLP endpoint is accessible:
+2. **Check OTLP endpoint is accessible:**
    ```bash
    curl http://localhost:4317
    ```
 
-3. Look for OTEL initialization messages in logs:
+3. **Verify OTLP exporter is installed:**
+   ```bash
+   python -c "from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter"
+   ```
+
+4. **Verify OTEL is enabled:**
+   ```bash
+   echo $OTEL_TRACES_ENABLED  # Should be "true"
+   ```
+
+5. **Look for OTEL initialization messages in logs:**
    ```
    INFO - OTEL tracing enabled for service: inference-perf
    INFO - Created OTEL tracer provider with OTLP exporter to http://localhost:4317
    ```
 
-### Missing attributes
+### Connection refused errors
 
-Ensure you're using the latest version of `opentelemetry-semantic-conventions-ai`:
+- Ensure Jaeger is running and OTLP port (4317) is exposed
+- Check firewall settings
+- Verify the endpoint URL is correct
 
-```bash
-pip install --upgrade opentelemetry-semantic-conventions-ai
-```
+### High memory usage
 
-## Examples
+- Reduce sampling rate using `OTEL_TRACES_SAMPLER`
+- Use `BatchSpanProcessor` instead of `SimpleSpanProcessor` (default for OTLP)
 
-See the `examples/otel/` directory for complete examples:
+## References
 
-- `examples/otel/configs/`: Example configuration files
-- `examples/otel/test_traces/`: Sample trace data
-- `examples/otel/run_with_jaeger.sh`: Script to run with Jaeger
-- `examples/otel/README_JAEGER.md`: Detailed Jaeger integration guide
+- [OpenTelemetry Documentation](https://opentelemetry.io/docs/)
+- [Jaeger Documentation](https://www.jaegertracing.io/docs/)
+- [GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
