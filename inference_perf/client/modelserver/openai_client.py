@@ -19,7 +19,7 @@ from inference_perf.apis import InferenceAPIData, InferenceInfo, RequestLifecycl
 from inference_perf.utils import CustomTokenizer
 from .base import ModelServerClient, ModelServerClientSession, PrometheusMetricMetadata
 from .otel_instrumentation import get_otel_instrumentation
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 import aiohttp
 import asyncio
 import json
@@ -168,7 +168,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
         span: Any,
         data: InferenceAPIData,
         response: Optional[aiohttp.ClientResponse],
-        response_info: Optional[ResponseInfo],
+        response_info: Optional[InferenceInfo],
         response_content: str,
         error: Optional[ErrorResponseInfo],
         start_time: float,
