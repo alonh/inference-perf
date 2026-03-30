@@ -200,14 +200,14 @@ class openAIModelServerClientSession(ModelServerClientSession):
             
             # Extract input and output following GenAI semantic conventions
             try:
-                # Extract input messages (gen_ai.input.messages as JSON string)
+                # Extract input based on request type
                 if hasattr(data, 'messages'):
-                    # Chat completion - serialize messages as JSON string
+                    # Chat completion - serialize messages as JSON string (gen_ai.input.messages)
                     input_messages = [{"role": msg.role, "content": msg.content} for msg in data.messages]
                     otel_response_info["input_messages"] = json.dumps(input_messages)
                 elif hasattr(data, 'prompt'):
-                    # Text completion - store as single message in JSON string
-                    otel_response_info["input_messages"] = json.dumps([{"role": "user", "content": data.prompt}])
+                    # Text completion - store as prompt string (gen_ai.prompt)
+                    otel_response_info["input_prompt"] = data.prompt
                 
                 # Extract output text (gen_ai.output.text)
                 if response and response.status == 200 and response_content:

@@ -197,7 +197,9 @@ class OTelInstrumentation:
                     # Core GenAI attributes
                     span.set_attribute(SpanAttributes.LLM_SYSTEM, "openai_compatible")
                     span.set_attribute(SpanAttributes.LLM_REQUEST_MODEL, model_name)
-                    span.set_attribute(SpanAttributes.LLM_REQUEST_TYPE, operation_name)
+                    # Map operation name to GenAI semantic convention operation types
+                    operation_type = "chat" if operation_name == "chat.completions" else "text_completion"
+                    span.set_attribute(SpanAttributes.LLM_REQUEST_TYPE, operation_type)
                     
                     # Add request-specific attributes if available
                     if request_data:
@@ -266,9 +268,13 @@ class OTelInstrumentation:
                 if "finish_reason" in response_info:
                     span.set_attribute(SpanAttributes.LLM_RESPONSE_FINISH_REASON, response_info["finish_reason"])
                 
-                # Input messages (gen_ai.input.messages) - stored as JSON string
+                # Input - either messages (for chat) or prompt (for completions)
                 if "input_messages" in response_info:
+                    # Chat completion - gen_ai.input.messages as JSON string
                     span.set_attribute("gen_ai.input.messages", response_info["input_messages"])
+                elif "input_prompt" in response_info:
+                    # Text completion - gen_ai.prompt as string
+                    span.set_attribute("gen_ai.prompt", response_info["input_prompt"])
                 
                 # Output text (gen_ai.output.text)
                 if "output_text" in response_info:
