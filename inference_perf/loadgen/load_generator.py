@@ -51,7 +51,7 @@ else:
     # Runtime usage will still require Python 3.11+.
     TaskGroup = object
 
-from typing import List, Tuple, Optional, NamedTuple, Union, Set, Dict, Any
+from typing import List, Tuple, Optional, NamedTuple, Union, Set, Dict
 from types import FrameType
 import time
 import multiprocessing as mp
@@ -408,7 +408,7 @@ class LoadGenerator:
         )  # Sessions waiting to start
         completed_session_ids: Set[str] = set()  # Session IDs that have completed
         session_dispatch_times: Dict[str, float] = {}  # session_id → wall-clock dispatch time
-        
+
         # Cache OTEL instrumentation to avoid redundant calls
         otel_instr = get_otel_instrumentation()
         session_spans: Dict[str, object] = {}  # session_id → OTEL span object
@@ -425,7 +425,7 @@ class LoadGenerator:
                 stage_info["session_rate"] = session_rate
             if timeout is not None:
                 stage_info["timeout"] = timeout
-            
+
             stage_span, stage_context_dict = otel_instr.start_stage_span(stage_id, stage_info)
             logger.info(f"Started stage-level OTEL span for stage {stage_id}")
 
@@ -478,10 +478,6 @@ class LoadGenerator:
             span, context_dict = otel_instr.start_session_span(session_id, session_info, parent_ctx)
             if span is not None:
                 session_spans[session_id] = span
-            
-            # Store OTEL context in shared state for workers to access
-            if context_dict and hasattr(self.datagen, 'shared_state'):
-                self.datagen.shared_state.store_session_otel_context(session_id, context_dict)
 
             # Activate session in DataGen (marks root nodes as ready)
             self.datagen.activate_session(session_id)
@@ -500,8 +496,9 @@ class LoadGenerator:
                 if worker_id >= 0:
                     worker_id = worker_id % active_workers
 
-                # Stamp session_id so the client can attach it to RequestLifecycleMetric
+                # Stamp session_id and OTEL context so workers can use them
                 lazy_data.session_id = session_id
+                lazy_data.otel_context = context_dict  # Embed OTEL context in data
 
                 event_time = time.perf_counter()
                 request_queue.put((stage_id, lazy_data, event_time, lora_adapter), worker_id)
@@ -532,8 +529,6 @@ class LoadGenerator:
                     # Clean up any active session spans (using cached otel_instr)
                     for sid in list(session_spans.keys()):
                         otel_instr.end_session_span(session_spans[sid], "Session interrupted by SIGINT")
-                        if hasattr(self.datagen, 'shared_state'):
-                            self.datagen.shared_state.cleanup_session_otel_context(sid)
                         del session_spans[sid]
                     break
 
@@ -543,8 +538,6 @@ class LoadGenerator:
                     # Clean up any active session spans (using cached otel_instr)
                     for sid in list(session_spans.keys()):
                         otel_instr.end_session_span(session_spans[sid], f"Session failed due to circuit breaker: {cb.name}")
-                        if hasattr(self.datagen, 'shared_state'):
-                            self.datagen.shared_state.cleanup_session_otel_context(sid)
                         del session_spans[sid]
                     break
 
@@ -555,8 +548,6 @@ class LoadGenerator:
                     # Clean up any active session spans (using cached otel_instr)
                     for sid in list(session_spans.keys()):
                         otel_instr.end_session_span(session_spans[sid], "Session timed out")
-                        if hasattr(self.datagen, 'shared_state'):
-                            self.datagen.shared_state.cleanup_session_otel_context(sid)
                         del session_spans[sid]
                     break
 
@@ -571,21 +562,17 @@ class LoadGenerator:
                         if session_id not in completed_session_ids:
                             completed_session_ids.add(session_id)
                             newly_completed.append(session_idx)
-                            
-                            # End OTEL session span and cleanup context (using cached otel_instr)
+
+                            # End OTEL session span (using cached otel_instr)
                             if session_id in session_spans:
                                 # Check if session failed
-                                session_failed = (hasattr(self.datagen, 'shared_state') and
-                                                self.datagen.shared_state.is_session_failed(session_id))
+                                session_failed = hasattr(
+                                    self.datagen, "shared_state"
+                                ) and self.datagen.shared_state.is_session_failed(session_id)
                                 error_msg = "Session failed" if session_failed else None
                                 otel_instr.end_session_span(session_spans[session_id], error_msg)
-                                
-                                # Cleanup OTEL context to prevent memory leak
-                                if hasattr(self.datagen, 'shared_state'):
-                                    self.datagen.shared_state.cleanup_session_otel_context(session_id)
-                                
                                 del session_spans[session_id]
-                            
+
                             logger.info(
                                 f"Session {session_idx} ({session_id}) completed "
                                 f"({len(completed_session_ids)}/{effective_num_sessions} total)"
