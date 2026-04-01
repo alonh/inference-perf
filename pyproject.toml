@@ -153,6 +153,7 @@ module = [
     "datasets.*",
     "matplotlib.*",
     "boto3.*",
+    "opentelemetry.*",
 ]
 ignore_missing_imports = true
 
