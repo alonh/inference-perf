@@ -60,13 +60,7 @@ def test_deep_merge() -> None:
 
 def test_read_config_timestamp_substitution() -> None:
     # Create a minimalistic config with {timestamp} in the storage path
-    config_content = {
-        "storage": {
-            "local_storage": {
-                "path": "reports-{timestamp}"
-            }
-        }
-    }
+    config_content = {"storage": {"local_storage": {"path": "reports-{timestamp}"}}}
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
         yaml.dump(config_content, tmp)
