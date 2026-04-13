@@ -23,7 +23,6 @@ from inference_perf.client.modelserver import ModelServerClient
 from inference_perf.client.modelserver.otel_instrumentation import get_otel_instrumentation
 from inference_perf.circuit_breaker import get_circuit_breaker
 from inference_perf.metrics import SessionMetricsCollector
-from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
 from inference_perf.config import (
     LoadConfig,
     LoadType,
@@ -394,8 +393,8 @@ class LoadGenerator:
 
         # Get total number of sessions
 
-        if not isinstance(self.datagen, OTelTraceReplayDataGenerator):
-            raise ValueError("Session-based replay requires OTelTraceReplayDataGenerator")
+        if not isinstance(self.datagen, SessionGenerator):
+            raise ValueError("Session-based replay requires a SessionGenerator")
 
         total_sessions = self.datagen.get_session_count()
         stage_status = StageStatus.RUNNING
@@ -599,8 +598,8 @@ class LoadGenerator:
 
                         # End OTEL session span (using cached otel_instr)
                         if session_id in session_spans:
-                            # Check if session failed from SessionGraphState
-                            session_state = self.datagen.session_graph_state.get(session_id)
+                            # Check if session failed from SessionGenerator state
+                            session_state = self.datagen.get_session_state(session_id)
                             session_failed = session_state.failed if session_state else False
                             error_msg = "Session failed" if session_failed else None
                             otel_instr.end_session_span(session_spans[session_id], error_msg)
@@ -723,7 +722,11 @@ class LoadGenerator:
         start_time = time.perf_counter() + 1
 
         if isinstance(self.datagen, DataGenerator) and self.datagen.trace is not None:
-            num_requests = self.datagen.get_request_count()
+            request_count = self.datagen.get_request_count()
+            if request_count is not None:
+                num_requests = request_count
+            else:
+                num_requests = int(rate * duration)
         else:
             num_requests = int(rate * duration)
 
@@ -942,7 +945,7 @@ class LoadGenerator:
                 return
 
         if self.load_type == LoadType.TRACE_SESSION_REPLAY:
-            if isinstance(self.datagen, OTelTraceReplayDataGenerator):
+            if isinstance(self.datagen, SessionGenerator):
                 total_sessions = self.datagen.get_session_count()
                 total_requested = sum(
                     s.num_sessions
