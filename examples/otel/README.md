@@ -68,7 +68,7 @@ Three coordination mechanisms handle this:
   `check_session_completed()` instead of polling shared state. The completion notification
   includes a `"failed"` field indicating whether the session failed.
 
-Each `OTelChatCompletionAPIData` holds references to `registry`, `worker_tracker`, and
+Each `SessionChatCompletionAPIData` holds references to `registry`, `worker_tracker`, and
 `completion_queue`. Before dispatching an HTTP request, the worker calls
 `wait_for_predecessors_and_substitute()`, which awaits predecessors via `registry.require_async()`
 (zero threads — pure `asyncio.Event` suspension), checks `worker_tracker` for session failure
@@ -84,7 +84,7 @@ When an event fails (network error, timeout, HTTP error), the system ensures dep
 hang and the session completes gracefully:
 
 **Worker-level failure handling:**
-1. `process_failure()` is called on the failed event's `OTelChatCompletionAPIData`
+1. `process_failure()` is called on the failed event's `SessionChatCompletionAPIData`
 2. The worker marks the entire session as failed in `WorkerSessionTracker` (local to that worker)
 3. `registry.record_failure(event_id)` is called — this sets the event's `asyncio.Event` without
    writing any output to `EventOutputRegistry`, keeping the registry clean
@@ -112,9 +112,9 @@ hang and the session completes gracefully:
   notification to `session_completion_queue` with `"failed": True` and a `"cancelled_events"`
   count (how many events will be skipped as a result of this failure). This does not wait for
   skipped events to finish.
-- The main process calls `_process_completion_queue()` which sets `SessionGraphState.is_complete`
-  and `SessionGraphState.failed` for the session.
-- When ending OTEL session spans, the load generator checks `SessionGraphState.failed` to mark
+- The main process calls `_process_completion_queue()` which sets `ReplayGraphSessionState.is_complete`
+  and `ReplayGraphSessionState.failed` for the session.
+- When ending OTEL session spans, the load generator checks `ReplayGraphSessionState.failed` to mark
   failed sessions with error messages.
 
 Note: OTel trace replay always runs in multiprocess mode (requires `num_workers > 0`) because it uses `SessionGenerator`, which is not supported in single-process mode.

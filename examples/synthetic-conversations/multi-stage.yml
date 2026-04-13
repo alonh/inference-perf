@@ -1,0 +1,82 @@
+# Larger multi-stage synthetic conversational session replay benchmark.
+#
+# Generates a larger in-memory synthetic corpus and ramps session concurrency
+# across multiple stages for sustained benchmark runs.
+#
+# Usage:
+#   python -m inference_perf.main --config examples/synthetic-conversations/multi-stage.yml
+
+api:
+  type: chat
+  streaming: true
+
+tokenizer:
+  pretrained_model_name_or_path: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+data:
+  type: synthetic_conversational_session_replay
+  synthetic_conversational_session_replay:
+    seed: 42
+    num_conversations: 500
+    # Shared prefix + dynamic suffix to exercise prefix caching behavior.
+    shared_system_prompt_len: 6000
+    dynamic_system_prompt_len:
+      type: normal
+      min: 500
+      max: 4000
+      mean: 2000
+      std_dev: 500
+    turns_per_conversation:
+      type: lognormal
+      min: 20
+      max: 60
+      mean: 40
+      std_dev: 8
+    input_tokens_per_turn:
+      type: normal
+      min: 500
+      max: 3000
+      mean: 1400
+      std_dev: 400
+    output_tokens_per_turn:
+      type: normal
+      min: 100
+      max: 1000
+      mean: 526
+      std_dev: 150
+    inter_turn_wait_ms:
+      type: fixed
+      min: 100
+      max: 100
+      mean: 100
+      std_dev: 0
+    model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+load:
+  type: trace_session_replay
+  stages:
+    - concurrent_sessions: 10
+      num_sessions: 100
+    - concurrent_sessions: 25
+      num_sessions: 100
+    - concurrent_sessions: 50
+      num_sessions: 100
+    - concurrent_sessions: 100
+      num_sessions: 100
+    - concurrent_sessions: 200
+      num_sessions: 100
+  num_workers: 8
+  worker_max_concurrency: 100000
+
+server:
+  type: vllm
+  base_url: "http://localhost:8000"
+  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: false
+
+# Made with Bob

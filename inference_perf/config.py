@@ -87,6 +87,7 @@ class DataGenType(Enum):
     InfinityInstruct = "infinity_instruct"
     BillsumConversations = "billsum_conversations"
     OTelTraceReplay = "otel_trace_replay"
+    SyntheticConversationalSessionReplay = "synthetic_conversational_session_replay"
 
 
 # Represents the distribution for input prompts and output generations.
@@ -123,7 +124,7 @@ class SharedPrefix(BaseModel):
 
 
 class SyntheticTraceDistribution(BaseModel):
-    """Distribution parameters for synthetic trace generation."""
+    """Distribution parameters for synthetic conversational session generation."""
 
     type: str = Field("normal", description="Distribution type: normal, lognormal, uniform, fixed")
     min: int = Field(10, description="Minimum value")
@@ -131,14 +132,20 @@ class SyntheticTraceDistribution(BaseModel):
     mean: float = Field(512, description="Target mean")
     std_dev: float = Field(200, description="Standard deviation")
 
+    @model_validator(mode="after")
+    def validate_distribution(self) -> "SyntheticTraceDistribution":
+        valid_types = {"normal", "lognormal", "uniform", "fixed"}
+        if self.type not in valid_types:
+            raise ValueError(f"Distribution type must be one of {sorted(valid_types)}, got '{self.type}'")
+        if self.max < self.min:
+            raise ValueError(f"Distribution max ({self.max}) must be >= min ({self.min})")
+        if self.std_dev < 0:
+            raise ValueError(f"Distribution std_dev ({self.std_dev}) must be >= 0")
+        return self
 
-class SyntheticTraceConfig(BaseModel):
-    """Configuration for inline synthetic trace generation.
 
-    When provided in OTelTraceReplayConfig.generate_synthetic, traces are
-    generated at init time into a temp directory — no trace_directory or
-    trace_files needed.
-    """
+class SyntheticConversationalSessionReplayConfig(BaseModel):
+    """Configuration for direct synthetic conversational session replay generation."""
 
     seed: int = Field(42, description="Random seed for deterministic generation")
     num_conversations: int = Field(500, gt=0, description="Number of conversations to generate")
@@ -153,6 +160,10 @@ class SyntheticTraceConfig(BaseModel):
     output_tokens_per_turn: Optional[SyntheticTraceDistribution] = Field(
         None, description="Output tokens per turn distribution"
     )
+    inter_turn_wait_ms: Optional[SyntheticTraceDistribution] = Field(
+        None, description="Wait time between dependent turns in milliseconds"
+    )
+    model_name: Optional[str] = Field(None, description="Recorded model name to place in generated graph calls")
 
 
 class OTelTraceReplayConfig(BaseModel):
@@ -160,9 +171,6 @@ class OTelTraceReplayConfig(BaseModel):
 
     trace_directory: Optional[str] = Field(None, description="Directory containing OTel JSON trace files")
     trace_files: Optional[List[str]] = Field(None, description="List of paths to specific OTel JSON trace files")
-    generate_synthetic: Optional[SyntheticTraceConfig] = Field(
-        None, description="Generate synthetic traces inline from distribution config"
-    )
 
     # Model configuration
     use_static_model: bool = Field(False, description="Use a single static model for all requests")
@@ -183,14 +191,13 @@ class OTelTraceReplayConfig(BaseModel):
             [
                 self.trace_directory is not None,
                 self.trace_files is not None,
-                self.generate_synthetic is not None,
             ]
         )
 
         if sources_provided == 0:
-            raise ValueError("One of trace_directory, trace_files, or generate_synthetic must be provided")
+            raise ValueError("One of trace_directory or trace_files must be provided")
         if sources_provided > 1:
-            raise ValueError("Specify only one of trace_directory, trace_files, or generate_synthetic")
+            raise ValueError("Specify only one of trace_directory or trace_files")
 
         # Validate static model configuration
         if self.use_static_model and not self.static_model_name:
@@ -216,6 +223,21 @@ class DataConfig(BaseModel):
 
     # OTel trace replay configuration
     otel_trace_replay: Optional[OTelTraceReplayConfig] = None
+    synthetic_conversational_session_replay: Optional[SyntheticConversationalSessionReplayConfig] = None
+
+    @model_validator(mode="after")
+    def validate_type_specific_config(self) -> "DataConfig":
+        if self.type == DataGenType.OTelTraceReplay and self.otel_trace_replay is None:
+            raise ValueError("data.type 'otel_trace_replay' requires 'data.otel_trace_replay' configuration")
+        if (
+            self.type == DataGenType.SyntheticConversationalSessionReplay
+            and self.synthetic_conversational_session_replay is None
+        ):
+            raise ValueError(
+                "data.type 'synthetic_conversational_session_replay' requires "
+                "'data.synthetic_conversational_session_replay' configuration"
+            )
+        return self
 
 
 class ModelServerType(Enum):
@@ -506,13 +528,16 @@ class Config(BaseModel):
     circuit_breakers: Optional[List[CircuitBreakerConfig]] = None
 
     @model_validator(mode="after")
-    def validate_otel_trace_replay_load_type(self) -> "Config":
-        """Validate that otel_trace_replay data type uses trace_session_replay load type."""
-        if self.data.type == DataGenType.OTelTraceReplay:
+    def validate_session_replay_load_type(self) -> "Config":
+        """Validate that session-based replay data types use trace_session_replay load type."""
+        if self.data.type in (
+            DataGenType.OTelTraceReplay,
+            DataGenType.SyntheticConversationalSessionReplay,
+        ):
             if self.load.type != LoadType.TRACE_SESSION_REPLAY:
                 raise ValueError(
-                    f"data.type 'otel_trace_replay' requires load.type 'trace_session_replay', "
-                    f"but got '{self.load.type.value}'. OTel trace replay with dependencies requires "
+                    f"data.type '{self.data.type.value}' requires load.type 'trace_session_replay', "
+                    f"but got '{self.load.type.value}'. Session-based replay with dependencies requires "
                     f"session-based load dispatch to properly handle event dependencies and timing."
                 )
         return self

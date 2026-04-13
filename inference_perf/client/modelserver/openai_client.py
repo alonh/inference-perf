@@ -28,7 +28,7 @@ import logging
 import requests
 import ssl
 
-from ...datagen.otel_trace_replay_datagen import OTelChatCompletionAPIData
+from ...datagen.replay_graph_session_datagen import SessionChatCompletionAPIData
 
 logger = logging.getLogger(__name__)
 
@@ -206,11 +206,10 @@ class openAIModelServerClientSession(ModelServerClientSession):
             try:
                 # Extract input based on request type
                 if hasattr(data, "messages"):
-                    # Chat completion - serialize messages as JSON string (gen_ai.input.messages)
-                    input_messages = [{"role": msg.role, "content": msg.content} for msg in data.messages]
+                    messages_data = data.messages
+                    input_messages = [{"role": msg.role, "content": msg.content} for msg in messages_data]
                     otel_response_info["input_messages"] = json.dumps(input_messages)  # type: ignore[assignment]
                 elif hasattr(data, "prompt"):
-                    # Text completion - store as prompt string (gen_ai.prompt)
                     otel_response_info["input_prompt"] = data.prompt
 
                 # Extract output text (gen_ai.output.text)
@@ -219,11 +218,9 @@ class openAIModelServerClientSession(ModelServerClientSession):
                     choices = response_json.get("choices", [])
                     if choices:
                         if "message" in choices[0]:
-                            # Chat completion response
                             output_text = choices[0].get("message", {}).get("content", "")
                             otel_response_info["output_text"] = output_text
                         elif "text" in choices[0]:
-                            # Text completion response
                             output_text = choices[0].get("text", "")
                             otel_response_info["output_text"] = output_text
             except Exception as e:
@@ -245,6 +242,8 @@ class openAIModelServerClientSession(ModelServerClientSession):
     ) -> None:
         # Compute effective model name: use LoRA adapter if provided, otherwise use client's model name
         effective_model_name = lora_adapter if lora_adapter else self.client.model_name
+        if effective_model_name is None:
+            raise ValueError("Model name is required to process a request")
         payload = await data.to_payload(
             effective_model_name=effective_model_name,
             max_tokens=self.client.max_completion_tokens,
@@ -315,10 +314,10 @@ class openAIModelServerClientSession(ModelServerClientSession):
                             # Y raises EventFailedError and skips rather than hanging indefinitely.
                             #
                             # Note: The original code only logged errors for non-200 responses without
-                            # calling process_failure(). This special handling for OTelChatCompletionAPIData
-                            # ensures proper failure propagation in trace replay scenarios.
+                            # calling process_failure(). This special handling for SessionChatCompletionAPIData
+                            # ensures proper failure propagation in session replay scenarios.
 
-                            if isinstance(data, OTelChatCompletionAPIData) and response is not None:
+                            if isinstance(data, SessionChatCompletionAPIData) and response is not None:
                                 error = ErrorResponseInfo(
                                     error_msg=response_content,
                                     error_type=f"HTTP Error {response.status}",

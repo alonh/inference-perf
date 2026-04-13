@@ -103,6 +103,10 @@ class DataGenerator(BaseGenerator):
         """Whether this generator supports shared prefix patterns."""
         raise NotImplementedError
 
+    def get_request_count(self) -> Optional[int]:
+        """Return the total number of requests if known ahead of time."""
+        return None
+
 
 class SessionGenerator(BaseGenerator):
     """Session-based trace replay for agentic workloads (TRACE_SESSION_REPLAY load type).
@@ -206,6 +210,14 @@ class SessionGenerator(BaseGenerator):
 
         Args:
             session_id: The session ID to clean up
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_session_state(self, session_id: str) -> Any:
+        """Return internal session state for the given session ID.
+
+        Returns implementation-specific state object, or None if the session is unknown.
         """
         raise NotImplementedError
 

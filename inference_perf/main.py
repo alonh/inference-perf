@@ -40,6 +40,7 @@ from inference_perf.datagen import (
     InfinityInstructDataGenerator,
     BillsumConversationsDataGenerator,
     OTelTraceReplayDataGenerator,
+    SyntheticConversationalSessionReplayDataGenerator,
 )
 from inference_perf.client.modelserver import (
     ModelServerClient,
@@ -186,7 +187,7 @@ def main_cli() -> None:
             raise Exception("Tokenizer initialization failed") from e
 
     # Define Model Server Client
-    model_server_client: ModelServerClient
+    model_server_client: Optional[ModelServerClient] = None
     if config.server:
         if config.server.type == ModelServerType.VLLM:
             model_server_client = vLLMModelServerClient(
@@ -250,6 +251,9 @@ def main_cli() -> None:
     else:
         raise Exception("model server client config missing")
 
+    if model_server_client is None:
+        raise Exception("Failed to initialize model server client")
+
     # Check load exists so datagen can derive total_count from the
     # stage configurations.
     if config.load is None:
@@ -258,10 +262,18 @@ def main_cli() -> None:
     if len(config.load.stages) == 0 and config.load.sweep is None:
         raise Exception("Load stages must be configured, or sweep must be configured")
 
-    # Create multiprocessing manager for OTel trace replay if needed
-    # Must be created before workers are forked
+    # Create multiprocessing manager for session replay datagens if needed.
+    # Must be created before workers are forked.
     mp_manager = None
-    if config.data and config.data.type == DataGenType.OTelTraceReplay and config.load.num_workers > 0:
+    if (
+        config.data
+        and config.data.type
+        in (
+            DataGenType.OTelTraceReplay,
+            DataGenType.SyntheticConversationalSessionReplay,
+        )
+        and config.load.num_workers > 0
+    ):
         mp_manager = mp.Manager()
 
     datagen: BaseGenerator
@@ -276,6 +288,7 @@ def main_cli() -> None:
                 DataGenType.InfinityInstruct,
                 DataGenType.BillsumConversations,
                 DataGenType.OTelTraceReplay,
+                DataGenType.SyntheticConversationalSessionReplay,
             }
         ):
             if tokenizer is None:
@@ -335,14 +348,21 @@ def main_cli() -> None:
             datagen = OTelTraceReplayDataGenerator(
                 config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
             )
+        elif config.data.type == DataGenType.SyntheticConversationalSessionReplay:
+            datagen = SyntheticConversationalSessionReplayDataGenerator(
+                config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
+            )
         else:
             datagen = MockDataGenerator(config.api, config.data, tokenizer)
     else:
         raise Exception("data config missing")
 
-    # Create session metrics collector only for agentic workflows (OTel trace replay)
+    # Create session metrics collector only for session-replay workflows
     session_metrics_collector = None
-    if config.data and config.data.type == DataGenType.OTelTraceReplay:
+    if config.data and config.data.type in (
+        DataGenType.OTelTraceReplay,
+        DataGenType.SyntheticConversationalSessionReplay,
+    ):
         session_metrics_collector = SessionMetricsCollector()
 
     # Define LoadGenerator with session metrics collector
