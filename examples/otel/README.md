@@ -63,12 +63,18 @@ data:
 
 When enabled, a unique random string is injected into **unique segment messages only** (not output
 or shared segments). The random string is:
-- **Unique per run**: Each benchmark run generates a different random UUID
-- **Consistent within session**: All events within the same session use the same random string (cached)
+- **Unique per session**: Each session generates a different random UUID
+- **Consistent within session**: All events within the same session use the same random string
 - **Format**: `[SESS:abc123def456] {original_content}`
 
+**Automatic injection for duplicated sessions:**
+Random strings are **always generated** for every session and **automatically injected** into
+duplicated sessions (those with `_dup` in their session_id) even when `inject_random_session_id`
+is `false`. This ensures duplicated sessions don't benefit from KV-cache hits from their originals.
+
 This ensures:
-- ✅ KV-cache is invalidated between different runs (even for the same trace files)
+- ✅ KV-cache is invalidated between different sessions when flag is enabled
+- ✅ KV-cache is invalidated between original and duplicated sessions (automatic)
 - ✅ KV-cache behavior within a session remains realistic (shared prefixes still hit)
 - ✅ Output and shared segments are not modified (preserving dependency semantics)
 
@@ -76,6 +82,7 @@ This ensures:
 - Measuring worst-case latency without KV-cache benefits
 - Testing cache eviction policies under memory pressure
 - Benchmarking scenarios where sessions have no shared context
+- Stress testing with duplicated sessions without cache pollution
 
 Three coordination mechanisms handle this:
 

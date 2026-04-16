@@ -61,6 +61,7 @@ import glob
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace as dc_replace
@@ -465,6 +466,22 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
         """
         return self.event_id.split(":")[0] if ":" in self.event_id else self.event_id
 
+    @staticmethod
+    def _is_duplicate_session(session_id: str) -> bool:
+        """Check if a session is a duplicate based on its ID.
+
+        Duplicates are created with the pattern: {original_id}_dup{number}
+        This method uses regex to robustly detect this pattern.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if the session is a duplicate, False otherwise
+        """
+        # Match pattern: anything followed by _dup and one or more digits at the end
+        return bool(re.search(r"_dup\d+$", session_id))
+
     async def wait_for_predecessors_and_substitute(self) -> None:
         """Wait for all predecessor events to complete, then substitute output segments.
 
@@ -510,13 +527,18 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
 
         # Substitute output segments with actual predecessor outputs, or inject random session ID into unique segments
         needs_substitution = any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments)
-        needs_random_injection = self.inject_random_session_id and any(seg.type == "unique" for seg in self.input_segments)
+        # Inject random string if flag is enabled OR session is a duplicate
+        is_duplicate = self._is_duplicate_session(session_id)
+        needs_random_injection = (self.inject_random_session_id or is_duplicate) and any(
+            seg.type == "unique" for seg in self.input_segments
+        )
 
         if needs_substitution or needs_random_injection:
             if needs_substitution:
                 logger.debug(f"Event {self.event_id} substituting output/shared segments")
             if needs_random_injection:
-                logger.debug(f"Event {self.event_id} injecting random session ID into unique segments")
+                reason = "flag enabled" if self.inject_random_session_id else "duplicate session"
+                logger.debug(f"Event {self.event_id} injecting random session ID ({reason})")
             substituted = self._build_messages_with_substitution()
             self.messages = [ChatMessage(role=m["role"], content=m["content"]) for m in substituted]
             logger.debug(f"Event {self.event_id} substitution complete, {len(self.messages)} messages")
@@ -587,9 +609,15 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                     for msg in seg_msgs_from_parent:
                         result.append(dict(msg))
             elif seg.type == "unique":
-                # Unique message - inject random session string if enabled
+                # Unique message - inject random session string if:
+                # 1. inject_random_session_id flag is enabled, OR
+                # 2. Session is a duplicate (matches pattern: {id}_dup{number})
                 for msg in seg_msgs:
-                    if self.inject_random_session_id and self.session_random_string:
+                    session_id = self._extract_session_id()
+                    is_duplicate = self._is_duplicate_session(session_id)
+                    should_inject = (self.inject_random_session_id or is_duplicate) and self.session_random_string
+
+                    if should_inject:
                         # Use the session random string passed from SessionGraphState
                         # Inject random string into message content
                         msg_copy = dict(msg)
@@ -598,7 +626,8 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                         # Prepend random session identifier to content
                         msg_copy["content"] = f"[SESS:{self.session_random_string}] {original_content}"
                         result.append(msg_copy)
-                        logger.debug(f"Event {self.event_id}: injected random session string into unique segment message")
+                        reason = "flag enabled" if self.inject_random_session_id else "duplicate session"
+                        logger.debug(f"Event {self.event_id}: injected random session string ({reason})")
                     else:
                         result.append(msg)
             else:
@@ -1067,11 +1096,12 @@ class OTelTraceReplayDataGenerator(SessionGenerator, LazyLoadDataMixin):
         self.all_events: List[OTelTraceReplayEvent] = []
 
         for session in self.sessions:
-            # Generate random string for KV-cache invalidation if enabled
-            random_string = None
-            if self.otel_config.inject_random_session_id:
-                random_string = uuid.uuid4().hex[:16]
-                logger.debug(f"Generated random string for session {session.session_id}: {random_string}")
+            # Always generate random string for each session
+            # Used for KV-cache invalidation when:
+            # 1. inject_random_session_id flag is enabled, OR
+            # 2. Session is a duplicate (contains "_dup" in session_id)
+            random_string = uuid.uuid4().hex[:16]
+            logger.debug(f"Generated random string for session {session.session_id}: {random_string}")
 
             # Initialize session graph state
             state = SessionGraphState(
