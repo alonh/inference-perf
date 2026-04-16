@@ -182,6 +182,18 @@ class OTelTraceReplayConfig(BaseModel):
     # Request configuration
     default_max_tokens: int = Field(1000, gt=0, description="Default max_tokens if not specified in trace")
 
+    # KV-cache invalidation
+    inject_random_session_id: bool = Field(
+        False, description="Inject random string into unique segments to invalidate KV-cache between sessions"
+    )
+
+    # Session duplication
+    duplicate_sessions_target: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Target number of sessions to reach by duplicating existing sessions. If None, no duplication occurs.",
+    )
+
     # Error handling
     include_errors: bool = Field(True, description="Include spans with error status")
     skip_invalid_files: bool = Field(False, description="Skip invalid trace files instead of failing")

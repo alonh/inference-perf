@@ -62,6 +62,7 @@ import json
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass, field, replace as dc_replace
 from multiprocessing.managers import SyncManager
 from pathlib import Path
@@ -126,6 +127,7 @@ class SessionGraphState:
     is_complete: bool = False  # Has this session finished all events?
     failed: bool = False  # Did this session fail?
     cancelled_events: int = 0  # Number of events cancelled due to failure
+    random_string: Optional[str] = None  # Random string for KV-cache invalidation (shared by all events in session)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +450,10 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
     original_messages: List[Dict[str, Any]] = field(default_factory=list)
     expected_output_content: Optional[str] = None
 
+    # KV-cache invalidation configuration
+    inject_random_session_id: bool = False
+    session_random_string: Optional[str] = None
+
     # Flag to skip HTTP request (set when session fails)
     skip_request: bool = False
 
@@ -502,9 +508,15 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
             logger.debug(f"Event {self.event_id} waiting {wait_sec:.3f}s (wait_ms={self.wait_ms})")
             await asyncio.sleep(wait_sec)
 
-        # Substitute output segments with actual predecessor outputs.
-        if any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments):
-            logger.debug(f"Event {self.event_id} substituting output/shared segments")
+        # Substitute output segments with actual predecessor outputs, or inject random session ID into unique segments
+        needs_substitution = any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments)
+        needs_random_injection = self.inject_random_session_id and any(seg.type == "unique" for seg in self.input_segments)
+
+        if needs_substitution or needs_random_injection:
+            if needs_substitution:
+                logger.debug(f"Event {self.event_id} substituting output/shared segments")
+            if needs_random_injection:
+                logger.debug(f"Event {self.event_id} injecting random session ID into unique segments")
             substituted = self._build_messages_with_substitution()
             self.messages = [ChatMessage(role=m["role"], content=m["content"]) for m in substituted]
             logger.debug(f"Event {self.event_id} substitution complete, {len(self.messages)} messages")
@@ -575,9 +587,20 @@ class OTelChatCompletionAPIData(ChatCompletionAPIData):
                     for msg in seg_msgs_from_parent:
                         result.append(dict(msg))
             elif seg.type == "unique":
-                # Unique message, keep as-is
+                # Unique message - inject random session string if enabled
                 for msg in seg_msgs:
-                    result.append(msg)
+                    if self.inject_random_session_id and self.session_random_string:
+                        # Use the session random string passed from SessionGraphState
+                        # Inject random string into message content
+                        msg_copy = dict(msg)
+                        original_content = msg_copy.get("content", "")
+
+                        # Prepend random session identifier to content
+                        msg_copy["content"] = f"[SESS:{self.session_random_string}] {original_content}"
+                        result.append(msg_copy)
+                        logger.debug(f"Event {self.event_id}: injected random session string into unique segment message")
+                    else:
+                        result.append(msg)
             else:
                 # Unknown segment type, keep as-is
                 result.extend(seg_msgs)
@@ -944,16 +967,18 @@ class OTelTraceReplayDataGenerator(SessionGenerator, LazyLoadDataMixin):
         logger.info(f"Randomized session order using seed: {self.base_seed}")
 
         # Duplicate sessions if needed to meet total session requirements
-        # self._duplicate_sessions_if_needed()
+        if self.otel_config.duplicate_sessions_target is not None:
+            self._duplicate_sessions_if_needed(self.otel_config.duplicate_sessions_target)
 
-    def _duplicate_sessions_if_needed(self) -> None:
+    def _duplicate_sessions_if_needed(self, target_sessions: int) -> None:
         """Duplicate sessions to ensure we have enough for high-concurrency testing.
 
         This is useful when the trace corpus is smaller than needed for stress testing.
         Sessions are duplicated with unique IDs to avoid conflicts.
-        Target: 300 sessions (enough for most test scenarios)
+
+        Args:
+            target_sessions: Target number of sessions to reach by duplication
         """
-        target_sessions = 300
         current_count = len(self.sessions)
 
         if current_count >= target_sessions:
@@ -1042,6 +1067,12 @@ class OTelTraceReplayDataGenerator(SessionGenerator, LazyLoadDataMixin):
         self.all_events: List[OTelTraceReplayEvent] = []
 
         for session in self.sessions:
+            # Generate random string for KV-cache invalidation if enabled
+            random_string = None
+            if self.otel_config.inject_random_session_id:
+                random_string = uuid.uuid4().hex[:16]
+                logger.debug(f"Generated random string for session {session.session_id}: {random_string}")
+
             # Initialize session graph state
             state = SessionGraphState(
                 session_id=session.session_id,
@@ -1052,6 +1083,7 @@ class OTelTraceReplayDataGenerator(SessionGenerator, LazyLoadDataMixin):
                 event_completion_times={},
                 is_active=False,
                 is_complete=False,
+                random_string=random_string,
             )
             self.session_graph_state[session.session_id] = state
 
@@ -1383,6 +1415,9 @@ class OTelTraceReplayDataGenerator(SessionGenerator, LazyLoadDataMixin):
             input_segments=event.input_segments,
             original_messages=event.messages,
             expected_output_content=event.expected_output,
+            # Pass KV-cache invalidation configuration and session random string
+            inject_random_session_id=self.otel_config.inject_random_session_id if hasattr(self, "otel_config") else False,
+            session_random_string=state.random_string if state else None,
             otel_context=data.otel_context,
             session_id=data.session_id,
             preferred_worker_id=data.preferred_worker_id,
