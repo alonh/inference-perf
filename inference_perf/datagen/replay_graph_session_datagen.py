@@ -34,7 +34,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiohttp import ClientResponse
 
-from inference_perf.apis import ChatCompletionAPIData, InferenceInfo, LazyLoadInferenceAPIData, SessionLifecycleMetric
+from inference_perf.apis import (
+    ChatCompletionAPIData,
+    InferenceInfo,
+    LazyLoadInferenceAPIData,
+    SessionLifecycleMetric,
+    StreamedInferenceResponseInfo,
+    UnaryInferenceResponseInfo,
+)
 from inference_perf.apis.chat import ChatMessage
 from inference_perf.apis.streaming_parser import parse_sse_stream
 from inference_perf.config import APIConfig, APIType, DataConfig, SessionReplayConfig
@@ -257,7 +264,6 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         """
         # Match pattern: anything followed by _dup and one or more digits at the end
         return bool(re.search(r"_dup\d+$", session_id))
-
 
     def _fail_and_notify(self, session_id: str, reason: str) -> None:
         """Mark this event and session as failed, notify the completion queue.
@@ -603,8 +609,10 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             output_len = tokenizer.count_tokens(output_text)
             info = SessionInferenceInfo(
                 input_tokens=prompt_len,
-                output_tokens=output_len,
-                output_token_times=output_token_times,
+                response_info=StreamedInferenceResponseInfo(
+                    output_tokens=output_len,
+                    output_token_times=output_token_times,
+                ),
                 lora_adapter=lora_adapter,
                 output_text=output_text or None,
                 output_message=streaming_output_message,
@@ -628,7 +636,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             output_len = tokenizer.count_tokens(output_text)
             info = SessionInferenceInfo(
                 input_tokens=prompt_len,
-                output_tokens=output_len,
+                response_info=UnaryInferenceResponseInfo(output_tokens=output_len),
                 lora_adapter=lora_adapter,
                 output_text=output_text or None,
                 output_message=output_message,
