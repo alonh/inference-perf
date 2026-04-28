@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace as dc_replace
@@ -306,7 +307,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
         # Substitute output segments with actual predecessor outputs, or inject random session ID into unique segments
         needs_substitution = any(seg.type == "output" or seg.type == "shared" for seg in self.input_segments)
         # Inject random string if flag is enabled OR session is a duplicate
-        is_duplicate = SessionGenerator.is_duplicate_session(session_id)
+        is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session_id)
         needs_random_injection = (self.inject_random_session_id or is_duplicate) and any(
             seg.type == "unique" for seg in self.input_segments
         )
@@ -452,7 +453,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                 # 2. Session is a duplicate (matches pattern: {id}_dup{number})
                 for msg in seg_msgs:
                     session_id = self._extract_session_id()
-                    is_duplicate = SessionGenerator.is_duplicate_session(session_id)
+                    is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session_id)
                     should_inject = (self.inject_random_session_id or is_duplicate) and self.session_random_string
 
                     if should_inject:
@@ -769,7 +770,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         self._build_replay_schedule()
         logger.debug("Loaded %d sessions with %d total events", len(self.sessions), len(self.all_events))
 
-    def _duplicate_sessions_if_needed(self, sessions: List[ReplaySession], target_sessions: int) -> List[ReplaySession]:
+    @staticmethod
+    def _duplicate_sessions_if_needed(sessions: List[ReplaySession], target_sessions: int) -> List[ReplaySession]:
         """Duplicate sessions to ensure we have enough for high-concurrency testing.
 
         This is useful when the trace corpus is smaller than needed for stress testing.
@@ -820,6 +822,22 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         logger.info(f"Duplicated {duplicates_needed} sessions. Total sessions now: {len(sessions)}")
         return sessions
 
+    @staticmethod
+    def is_duplicate_session(session_id: str) -> bool:
+        """Check if a session is a duplicate based on its ID.
+
+        Duplicates are created with the pattern: {original_id}_dup{number}
+        This method uses regex to robustly detect this pattern.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if the session is a duplicate, False otherwise
+        """
+        # Match pattern: anything followed by _dup and one or more digits at the end
+        return bool(re.search(r"_dup\d+$", session_id))
+
     def get_supported_apis(self) -> List[APIType]:
         return [APIType.Chat]
 
@@ -835,7 +853,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             # 1. inject_random_session_id flag is enabled, OR
             # 2. Session is a duplicate (contains "_dup" in session_id)
             random_string = None
-            is_duplicate = self.is_duplicate_session(session.session_id)
+            is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session.session_id)
             if (self.replay_config and self.replay_config.inject_random_session_id) or is_duplicate:
                 random_string = uuid.uuid4().hex[:16]
                 logger.debug(f"Generated random string for session {session.session_id}: {random_string}")
