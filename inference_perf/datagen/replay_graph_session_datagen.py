@@ -575,7 +575,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                 content = delta.get("content")
                 return str(content) if content is not None else None
 
-            output_text, output_token_times, raw_content, _, _ = await parse_sse_stream(
+            output_text, output_token_times, raw_content, _, server_usage = await parse_sse_stream(
                 response, extract_content=_extract_streaming_content
             )
 
@@ -590,7 +590,14 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
 
             prompt_text = "".join([msg.content for msg in self.messages if msg.content is not None])
             prompt_len = tokenizer.count_tokens(prompt_text)
-            output_len = tokenizer.count_tokens(output_text)
+            server_completion_tokens = server_usage.get("completion_tokens") if server_usage else None
+            if server_completion_tokens is not None:
+                output_len = int(server_completion_tokens)
+            else:
+                tc_text = ""
+                if tool_call_chunks:
+                    tc_text = json.dumps([tool_call_chunks[i] for i in sorted(tool_call_chunks)], ensure_ascii=False)
+                output_len = tokenizer.count_tokens(output_text + tc_text)
             info = SessionInferenceInfo(
                 input_tokens=prompt_len,
                 response_info=StreamedInferenceResponseInfo(
@@ -607,6 +614,7 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             prompt_len = tokenizer.count_tokens("".join([m.content for m in self.messages if m.content is not None]))
             choices = data.get("choices", [])
             output_message: Optional[Dict[str, Any]] = None
+            tool_calls = None
             if choices:
                 msg_dict = choices[0].get("message", {})
                 output_text = msg_dict.get("content", "") or ""
@@ -617,7 +625,15 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
                         output_message["content"] = output_text
                 else:
                     output_message = {"role": "assistant", "content": output_text}
-            output_len = tokenizer.count_tokens(output_text)
+            usage = data.get("usage") or {}
+            server_completion_tokens = usage.get("completion_tokens")
+            if server_completion_tokens is not None:
+                output_len = int(server_completion_tokens)
+            else:
+                tc_text = ""
+                if tool_calls:
+                    tc_text = json.dumps(tool_calls, ensure_ascii=False)
+                output_len = tokenizer.count_tokens(output_text + tc_text)
             info = SessionInferenceInfo(
                 input_tokens=prompt_len,
                 response_info=UnaryInferenceResponseInfo(output_tokens=output_len),
