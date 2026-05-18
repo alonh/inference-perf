@@ -5,7 +5,10 @@ api:
 data:
   type: otel_trace_replay
   otel_trace_replay:
-    hf_dataset_path: "Exgentic/agent-llm-traces"
+    hf_dataset_path:
+      path: "Exgentic/agent-llm-traces"
+      filter: "lambda x: x['benchmark'] == 'appworld' and x.get('max_tokens', 0) < 80000"
+
       # Optional: Provide HF dataset details in a nested way.
       #path: "Exgentic/agent-llm-traces"
       #revision: "v1"     # Optional: git revision (branch, tag, or commit hash)
@@ -24,7 +27,7 @@ load:
   type: trace_session_replay
   stages:
     - concurrent_sessions: 10 # number of concurrent sessions to replay in this stage
-      num_sessions: 100 # Total number of sessions to replay in this stage, out of the 1,781 available
+      num_sessions: 300 # Total number of sessions to replay in this stage, out of the 1,781 available
                         # in the dataset. To replay more than 1,781 sessions, use duplicate_sessions_target
                         # to duplicate existing sessions until the desired target is reached.
   worker_max_concurrency: 8000

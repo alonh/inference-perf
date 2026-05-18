@@ -209,6 +209,8 @@ def _download_hf_dataset(dataset_config: Union[str, Dict[str, Any]]) -> List[Dic
         ValueError: If dataset cannot be downloaded, doesn't contain trace data, or schema is invalid
     """
     # Parse config - support both string and dict formats
+    filter_expr = None  # Initialize filter expression
+    
     if isinstance(dataset_config, str):
         dataset_path = dataset_config
         load_kwargs = {}  # No additional kwargs for string format
@@ -219,8 +221,11 @@ def _download_hf_dataset(dataset_config: Union[str, Dict[str, Any]]) -> List[Dic
 
         dataset_path = dataset_path_value
 
-        # Extract all kwargs except 'path'
-        load_kwargs = {k: v for k, v in dataset_config.items() if k != "path"}
+        # Extract filter separately (not a load_dataset parameter)
+        filter_expr = dataset_config.get("filter")
+        
+        # Extract all kwargs except 'path' and 'filter'
+        load_kwargs = {k: v for k, v in dataset_config.items() if k not in ("path", "filter")}
     else:
         raise ValueError(f"hf_dataset_path must be a string or dict, got {type(dataset_config)}")
 
@@ -230,6 +235,18 @@ def _download_hf_dataset(dataset_config: Union[str, Dict[str, Any]]) -> List[Dic
         # Load dataset directly using datasets library with all provided kwargs
         split = load_kwargs.pop("split", "train")  # default split is train
         dataset = load_dataset(dataset_path, split=split, **load_kwargs)
+
+        # Apply filter if provided
+        if filter_expr:
+            logger.info(f"Applying filter: {filter_expr}")
+            try:
+                # Evaluate the lambda expression
+                filter_func = eval(filter_expr)
+                original_size = len(dataset)
+                dataset = dataset.filter(filter_func)
+                logger.info(f"Filter applied: {original_size} -> {len(dataset)} records")
+            except Exception as filter_error:
+                raise ValueError(f"Failed to apply filter '{filter_expr}': {filter_error}") from filter_error
 
         # Validate dataset schema
         _validate_hf_dataset_schema(dataset, dataset_path)
