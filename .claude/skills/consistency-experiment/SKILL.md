@@ -16,7 +16,7 @@ not compounding cascade drift. Without the flag you'd measure input divergence i
 
 ## Prerequisites
 
-- Python venv at `.venv/` — use `/Users/alonhal/PycharmProjects/inference-perf/.venv/bin/python`.
+- Python venv at the repo root (`.venv/`); invoke it as `.venv/bin/python` from the repo root.
 - A reachable inference endpoint. Default is RITS (header auth `RITS_API_KEY`, NOT Bearer).
   **The RITS gateway is flaky** — probe it before a long run (step 0).
 - **Ask the user for the RITS API key, then `export RITS_API_KEY=<key>`** in the shell.
@@ -145,7 +145,8 @@ real trajectories.
 ## Known caveat
 
 The trace-replay generator currently leaves `session_id` **null** on per-request metrics
-(`replay_graph_session_datagen.py:1388` passes the lazy stub's `None` instead of the
+(in `inference_perf/datagen/replay_graph_session_datagen.py`, the built
+`SessionChatCompletionAPIData` is passed the lazy stub's `None` instead of the locally
 extracted session id). The analyzer works around this via `trace_key()` (hash of the
 request's leading message), which can split one dataset session into two trace-ids —
 harmless, since groups still join on the exact request hash.

@@ -1,4 +1,18 @@
 #!/bin/bash
+
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 # Run the exgentic consistency experiment: replay the same 10 traces N times against
 # RITS, each run as an independent process writing its own report directory.
 #
@@ -43,9 +57,11 @@ for i in $(seq 1 "$N_RUNS"); do
   echo ""
   echo "--- Run $i/$N_RUNS  ->  $run_dir ---"
   # RITS_API_KEY is injected via CLI override (the config holds only a placeholder).
+  # --api.headers takes the WHOLE headers dict as a JSON string (there is no dotted
+  # --api.headers.<key> flag), so pass the full object.
   "$PYTHON" -m inference_perf.main \
     --config "$CONFIG" \
-    --api.headers.RITS_API_KEY "$RITS_API_KEY" \
+    --api.headers "{\"RITS_API_KEY\":\"$RITS_API_KEY\"}" \
     --storage.local_storage.path "$run_dir" \
     >"$log_file" 2>&1
   rc=$?

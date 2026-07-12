@@ -78,8 +78,9 @@ arguments inconsistently.
   away to the 4096-token cap while siblings stopped at 7–16 tokens. Length is stable in
   the common case, catastrophically unstable in rare tail cases.
 - **11 trace-ids, not 10:** the trace-replay generator leaves `session_id` null on the
-  metric (lib bug — `replay_graph_session_datagen.py:1388` passes the lazy stub's `None`
-  instead of the extracted session id). The analyzer falls back to hashing each call's
+  metric (lib bug — in `inference_perf/datagen/replay_graph_session_datagen.py` the built
+  `SessionChatCompletionAPIData` gets the lazy stub's `None` instead of the extracted
+  session id). The analyzer falls back to hashing each call's
   leading message; one dataset session with varying first-messages split into two ids.
   This does **not** affect the aggregate — groups still join on exact request hash.
 - Measures the **deployed serving stack** (model + vLLM sampling/batching), not weights

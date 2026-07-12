@@ -5,9 +5,10 @@
 
 ## Goal
 
-Measure how *consistent* the RITS-served Qwen3-30B endpoint is: given **identical
-inputs**, how repeatable are its outputs? We run the same 10 exgentic agent traces,
-10 times each, and analyze the differences between the 10 copies of every call.
+Measure how *consistent* a RITS-served endpoint is: given **identical inputs**, how
+repeatable are its outputs? We run the same 10 exgentic agent traces, 10 times each, and
+analyze the differences between the 10 copies of every call. (The reference run used
+`Qwen/Qwen3-VL-235B-A22B-Instruct`.)
 
 ## Why `disable_output_substitution: true` is the linchpin
 
@@ -40,27 +41,33 @@ RITS-served model's output?*
 
 ## Architecture
 
-Three artifacts under `alon/` (kept uncommitted per repo convention):
+> **As built:** the files described below now live under
+> `experiments/consistency-replay/` (tracked, committed). The reference run used
+> `Qwen/Qwen3-VL-235B-A22B-Instruct` on RITS with the API key supplied via the
+> `RITS_API_KEY` environment variable (no key in the repo). See `README.md` for the
+> current commands and layout.
 
-### 1. Config — `alon/examples/otel/configs/experiments/rits_consistency_exgentic.yml`
+Three artifacts:
+
+### 1. Config — `experiments/consistency-replay/config.yml`
 - `data.otel_trace_replay.hf_dataset_path: Exgentic/agent-llm-traces`
 - `disable_output_substitution: true`
-- `use_static_model: true`, `static_model_name: Qwen/Qwen3-30B-A3B-Thinking-2507`
-- `default_max_tokens: 200` (bounds the thinking model; keeps runs comparable/cheap)
-- `api.headers.RITS_API_KEY` for auth; `server.api_key` left unset
+- `use_static_model: true`, `static_model_name: Qwen/Qwen3-VL-235B-A22B-Instruct`
+- `default_max_tokens: 200` (bounds output; keeps runs comparable/cheap)
+- `api.headers.RITS_API_KEY` for auth (placeholder in the file; injected at run time); `server.api_key` left unset
 - `load.type: trace_session_replay`, one stage `{concurrent_sessions: 10, num_sessions: 10}`
-- `load.base_seed: 42` — fixed so all 10 process runs replay the **same** 10 traces
+- `load.base_seed` — fixed so all 10 process runs replay the **same** 10 traces
 - `report.request_lifecycle.per_request: true` — **the data source**: writes
   `per_request_lifecycle_metrics.json` with full `request` + `response` bodies
-- `storage.local_storage.path` read from env `CONSISTENCY_RUN_DIR` (default provided)
-  so the runner points each iteration at its own directory.
+- `storage.local_storage.path` overridden per iteration by the runner via the
+  `--storage.local_storage.path` CLI flag.
 
-### 2. Runner — `alon/experiments/run_consistency.sh`
-Loops `i` in 1..10, sets `CONSISTENCY_RUN_DIR=reports-consistency/run_$i`, invokes
-`python -m inference_perf.main --config <cfg>` once per iteration. Sequential to avoid
-self-induced load skew and to be gentle on the flaky gateway. Logs each run.
+### 2. Runner — `experiments/consistency-replay/run_consistency.sh`
+Loops `i` in 1..N, invokes `python -m inference_perf.main --config <cfg>` once per
+iteration into `reports-consistency/run_$i`, injecting the API key from `RITS_API_KEY`.
+Sequential to avoid self-induced load skew and to be gentle on the flaky gateway.
 
-### 3. Analyzer — `alon/experiments/analyze_consistency.py`
+### 3. Analyzer — `experiments/consistency-replay/analyze_consistency.py`
 - Loads `per_request_lifecycle_metrics.json` from all `run_*` dirs.
 - **Join key:** `(session_id, sha1(request_payload))`. With substitution off, identical
   inputs across runs yield identical request bodies, giving an exact join. Each group =

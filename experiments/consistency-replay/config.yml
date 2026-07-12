@@ -1,5 +1,5 @@
-# Consistency experiment: first 10 exgentic agent traces, replayed against the live
-# RITS Qwen3-30B endpoint with output substitution DISABLED.
+# Consistency experiment: first 10 exgentic agent traces, replayed against a live
+# RITS endpoint with output substitution DISABLED.
 #
 # disable_output_substitution: true is the linchpin. With it on, every turn always
 # sends the RECORDED prior context, so across the 10 independent process runs of this
@@ -7,7 +7,7 @@
 # the outputs is therefore pure model/server nondeterminism (sampling + vLLM batching
 # + KV-cache), not compounding cascade drift from live predecessor outputs.
 #
-# Run this config 10 times (see alon/experiments/run_consistency.sh), overriding the
+# Run this config 10 times (see run_consistency.sh in this directory), overriding the
 # storage path per iteration via --storage.local_storage.path. Sampling is left at the
 # server default (no temperature override) to measure real-world consistency.
 
@@ -17,7 +17,8 @@ api:
   headers:
     # Placeholder — the runner (run_consistency.sh) injects the real key from the
     # RITS_API_KEY environment variable via a CLI override. If you invoke
-    # inference_perf.main directly, pass --api.headers.RITS_API_KEY "$RITS_API_KEY".
+    # inference_perf.main directly, pass the whole headers dict as a JSON string:
+    #   --api.headers "{\"RITS_API_KEY\":\"$RITS_API_KEY\"}"
     RITS_API_KEY: "SET_VIA_ENV"
 
 data:
@@ -45,7 +46,7 @@ load:
       num_sessions: 10
   worker_max_concurrency: 20
   # Fixed seed so the SAME 10 traces are selected on every one of the 10 process runs.
-  base_seed: 42
+  base_seed: 41
 
 server:
   type: vllm
