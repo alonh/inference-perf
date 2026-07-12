@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Output Consistency — exgentic × RITS</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2e; --panel2:#1d2740; --edge:#2a3550;
+    --ink:#e7ecf5; --muted:#94a3c4; --accent:#6ea8fe; --good:#3ddc84;
+    --warn:#ffcf5c; --bad:#ff6b6b; --add:#1f6f43; --del:#7a2230;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:var(--bg);color:var(--ink)}
+  a{color:var(--accent)}
+  header{padding:18px 24px;border-bottom:1px solid var(--edge);background:linear-gradient(180deg,#141b2c,#0f1420)}
+  header h1{margin:0 0 4px;font-size:19px}
+  header .sub{color:var(--muted);font-size:13px}
+  .wrap{display:grid;grid-template-columns:300px 1fr;min-height:calc(100vh - 74px)}
+  /* sidebar */
+  .side{border-right:1px solid var(--edge);overflow-y:auto;max-height:calc(100vh - 74px);background:var(--panel)}
+  .side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+           margin:16px 16px 8px}
+  .trace{padding:9px 16px;cursor:pointer;border-left:3px solid transparent}
+  .trace:hover{background:var(--panel2)}
+  .trace.active{background:var(--panel2);border-left-color:var(--accent)}
+  .trace .name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .trace .meta{color:var(--muted);font-size:11px;margin-top:2px}
+  .bar{height:4px;border-radius:2px;background:#33405f;margin-top:5px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--bad),var(--warn),var(--good))}
+  /* main */
+  .main{overflow-y:auto;max-height:calc(100vh - 74px);padding:20px 24px}
+  .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:13px 15px}
+  .card .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .card .v{font-size:24px;font-weight:650;margin-top:3px}
+  .card .d{color:var(--muted);font-size:11px;margin-top:3px}
+  .grouplist{display:flex;flex-direction:column;gap:8px}
+  .grow{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:12px 14px;cursor:pointer}
+  .grow:hover{border-color:var(--accent)}
+  .grow.active{border-color:var(--accent);background:var(--panel2)}
+  .grow .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .grow .ctx{color:var(--muted);font-size:12px;margin-top:6px;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Menlo,monospace}
+  .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--edge);white-space:nowrap}
+  .pill.good{color:var(--good);border-color:#2a5d40}
+  .pill.warn{color:var(--warn);border-color:#5d5326}
+  .pill.bad{color:var(--bad);border-color:#5d2a2a}
+  .pill.info{color:var(--accent);border-color:#2a405d}
+  .pill.tool{color:#c9a6ff;border-color:#43305d}
+  /* detail */
+  .detail{margin-top:6px}
+  .backlink{color:var(--muted);cursor:pointer;font-size:13px;margin-bottom:10px;display:inline-block}
+  .backlink:hover{color:var(--ink)}
+  .inputbox{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:12px 14px;margin-bottom:16px}
+  .inputbox .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .inputbox pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;
+                font-size:12px;max-height:150px;overflow:auto;color:#cdd7ee}
+  .sysrow{color:var(--muted);font-size:11px;margin-bottom:8px}
+  .hint{color:var(--muted);font-size:12px;margin:6px 0 12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .ver{background:var(--panel);border:1px solid var(--edge);border-radius:9px;padding:10px;cursor:pointer;
+       position:relative;transition:border-color .1s}
+  .ver:hover{border-color:var(--accent)}
+  .ver.selA{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  .ver.selB{border-color:var(--good);box-shadow:0 0 0 1px var(--good)}
+  .ver.err{opacity:.5;cursor:default}
+  .ver .vh{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:11px}
+  .ver .run{font-weight:650}
+  .ver .cl{width:14px;height:14px;border-radius:4px;display:inline-block}
+  .ver .body{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;
+             word-break:break-word;max-height:180px;overflow:auto;color:#d5def3}
+  .ver .tc{color:#c9a6ff}
+  .selmark{position:absolute;top:8px;right:8px;font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px}
+  .selmark.a{background:var(--accent);color:#08101f}
+  .selmark.b{background:var(--good);color:#08101f}
+  /* diff panel */
+  .diffwrap{position:sticky;bottom:0;margin-top:16px;background:var(--panel2);border:1px solid var(--accent);
+            border-radius:10px;padding:14px}
+  .diffwrap h3{margin:0 0 10px;font-size:14px}
+  .diffmetrics{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .diffcols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .diffcol{background:#121a2b;border:1px solid var(--edge);border-radius:8px;padding:10px;max-height:340px;overflow:auto}
+  .diffcol h4{margin:0 0 6px;font-size:12px;color:var(--muted)}
+  .diffcol .txt{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;word-break:break-word}
+  ins{background:var(--add);text-decoration:none;border-radius:2px}
+  del{background:var(--del);text-decoration:none;border-radius:2px}
+  .legend{color:var(--muted);font-size:11px;margin-top:8px}
+  .semantic{background:#182236;border:1px solid #2a405d;border-radius:8px;padding:10px 12px;margin:12px 0}
+  .semantic .lbl{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .clusterbadges{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .filterbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .filterbar select,.filterbar input{background:var(--panel);color:var(--ink);border:1px solid var(--edge);
+       border-radius:7px;padding:6px 9px;font-size:13px}
+  .empty{color:var(--muted);padding:40px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Output Consistency — same input, 10 runs</h1>
+  <div class="sub" id="subtitle"></div>
+</header>
+<div class="wrap">
+  <aside class="side">
+    <h2>Overview</h2>
+    <div class="trace" data-trace="__ALL__"><div class="name">All traces</div>
+      <div class="meta" id="allmeta"></div></div>
+    <h2>Traces (most inconsistent first)</h2>
+    <div id="tracelist"></div>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const CLUSTER_COLORS = ['#6ea8fe','#3ddc84','#ffcf5c','#ff6b6b','#c9a6ff','#4dd0e1','#f78fb3','#a3e635','#fb923c','#e879f9'];
+function cc(i){return CLUSTER_COLORS[i % CLUSTER_COLORS.length];}
+
+let state = {trace:'__ALL__', group:null, selA:null, selB:null};
+
+// ---- helpers ----
+function pillClass(v, goodHigh=true){
+  if(v==null) return 'info';
+  if(goodHigh){ return v>=0.85?'good':v>=0.6?'warn':'bad'; }
+  return v<=1?'good':v<=3?'warn':'bad';
+}
+function fmtPct(v){return v==null?'–':(v*100).toFixed(0)+'%';}
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+// word-level LCS diff
+function diffWords(a,b){
+  const A=a.split(/(\s+)/), B=b.split(/(\s+)/);
+  const n=A.length,m=B.length;
+  const dp=Array.from({length:n+1},()=>new Int32Array(m+1));
+  for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)
+    dp[i][j]=A[i]===B[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+  let i=0,j=0,left='',right='';
+  while(i<n&&j<m){
+    if(A[i]===B[j]){left+=esc(A[i]);right+=esc(B[j]);i++;j++;}
+    else if(dp[i+1][j]>=dp[i][j+1]){left+='<del>'+esc(A[i])+'</del>';i++;}
+    else {right+='<ins>'+esc(B[j])+'</ins>';j++;}
+  }
+  while(i<n){left+='<del>'+esc(A[i])+'</del>';i++;}
+  while(j<m){right+='<ins>'+esc(B[j])+'</ins>';j++;}
+  return [left,right];
+}
+
+function versionText(v){
+  if(v.content && v.content.trim()) return v.content;
+  if(v.tool_calls && v.tool_calls.length)
+    return v.tool_calls.map(t=>t.name+'('+(t.arguments||'')+')').join('\n');
+  return '';
+}
+
+// ---- render sidebar ----
+function renderSidebar(){
+  const s=DATA.summary;
+  document.getElementById('subtitle').textContent =
+    `${DATA.meta.model} on ${DATA.meta.endpoint} · ${DATA.meta.n_runs} runs · substitution OFF (identical inputs) · ${s.n_usable} comparable call positions`;
+  document.getElementById('allmeta').textContent =
+    `${s.n_usable} groups · ${s.pct_identical}% identical`;
+  const traces = Object.entries(DATA.per_trace)
+    .filter(([,v])=>v.n_usable>0)
+    .sort((a,b)=> (a[1].median_lev??1)-(b[1].median_lev??1));
+  const el=document.getElementById('tracelist');
+  el.innerHTML = traces.map(([t,v])=>{
+    const inconsistency = 1-(v.median_lev??1);
+    return `<div class="trace" data-trace="${t}">
+      <div class="name">${t.replace('trace_','')}</div>
+      <div class="meta">${v.n_usable} calls · ${v.pct_identical}% identical · lev ${v.median_lev??'–'}</div>
+      <div class="bar"><i style="width:${Math.round(inconsistency*100)}%"></i></div>
+    </div>`;
+  }).join('');
+  bindSidebar();
+}
+function bindSidebar(){
+  document.querySelectorAll('.trace').forEach(node=>{
+    node.onclick=()=>{ state.trace=node.dataset.trace; state.group=null; render(); };
+  });
+}
+function highlightSidebar(){
+  document.querySelectorAll('.trace').forEach(n=>
+    n.classList.toggle('active', n.dataset.trace===state.trace));
+}
+
+// ---- render main ----
+function groupsForTrace(){
+  return DATA.groups.filter(g=>g.metrics.n_ok>=2 &&
+    (state.trace==='__ALL__' || g.trace===state.trace));
+}
+
+function renderDash(){
+  const s=DATA.summary;
+  return `<div class="dash">
+    <div class="card"><div class="k">Byte-identical</div><div class="v">${s.pct_identical}%</div>
+      <div class="d">of call positions, all runs equal</div></div>
+    <div class="card"><div class="k">Distinct outputs / call</div><div class="v">${s.median_distinct}<span style="font-size:14px;color:var(--muted)"> med</span></div>
+      <div class="d">out of ${DATA.meta.n_runs} runs</div></div>
+    <div class="card"><div class="k">Pairwise similarity</div><div class="v">${s.median_lev}</div>
+      <div class="d">median Levenshtein (1=identical)</div></div>
+    <div class="card"><div class="k">Comparable calls</div><div class="v">${s.n_usable}</div>
+      <div class="d">identical-input positions</div></div>
+  </div>`;
+}
+
+function renderList(){
+  const gs=groupsForTrace();
+  const items = gs.map((g,idx)=>{
+    const m=g.metrics;
+    const gi = DATA.groups.indexOf(g);
+    const identical = m.all_identical;
+    const levPill = `<span class="pill ${pillClass(m.mean_pairwise_lev)}">lev ${m.mean_pairwise_lev??'–'}</span>`;
+    const distPill = `<span class="pill ${m.distinct<=1?'good':m.distinct<=3?'warn':'bad'}">${m.distinct} distinct</span>`;
+    const sem = g.semantic&&g.semantic.clusters!=null
+      ? `<span class="pill ${g.semantic.clusters<=1?'good':g.semantic.clusters<=2?'warn':'bad'}">${g.semantic.clusters} meaning${g.semantic.clusters>1?'s':''}</span>`:'';
+    const tool = m.is_tool_turn?`<span class="pill tool">tool call</span>`:'';
+    const idp = identical?`<span class="pill good">✓ identical</span>`:'';
+    const ctx = esc((g.input.last_message||'').slice(0,140)) || '(no text input)';
+    return `<div class="grow" data-gi="${gi}">
+      <div class="top">
+        <strong>${g.trace.replace('trace_','')}</strong>
+        <span class="pill info">${m.n_ok}/${m.n_runs} ok</span>
+        ${idp}${distPill}${levPill}${sem}${tool}
+      </div>
+      <div class="ctx">▸ ${ctx}</div>
+    </div>`;
+  }).join('');
+  return `<div class="grouplist">${items||'<div class="empty">No comparable calls.</div>'}</div>`;
+}
+
+function renderMainList(){
+  const m=document.getElementById('main');
+  const title = state.trace==='__ALL__'?'All call positions':state.trace.replace('trace_','');
+  m.innerHTML = renderDash() +
+    `<div class="filterbar"><strong>${title}</strong>
+      <span class="hint">— click a call to compare its ${DATA.meta.n_runs} versions side by side</span></div>` +
+    renderList();
+  m.querySelectorAll('.grow').forEach(n=>{
+    n.onclick=()=>{ state.group=+n.dataset.gi; state.selA=null; state.selB=null; render(); };
+  });
+  m.scrollTop=0;
+}
+
+function renderDetail(){
+  const g=DATA.groups[state.group];
+  const m=document.getElementById('main');
+  const okIdx=g.ok_index_map;
+  // default selection: first two distinct clusters if possible
+  if(state.selA==null||state.selB==null){
+    state.selA=0;
+    let b=1;
+    for(let k=1;k<okIdx.length;k++){ if(g.cluster_ids[k]!==g.cluster_ids[0]){b=k;break;} }
+    state.selB=Math.min(b,okIdx.length-1);
+    if(okIdx.length<2) state.selB=0;
+  }
+  const inp=g.input;
+  const sysRow = inp.system_head
+    ? `<div class="sysrow">system prompt: ${esc(inp.system_head.slice(0,160))}…</div>`:'';
+  const toolsRow = inp.tools&&inp.tools.length
+    ? `<div class="sysrow">tools available: ${esc(inp.tools.join(', '))}</div>`:'';
+
+  const sem = g.semantic&&g.semantic.clusters!=null ? `<div class="semantic">
+      <div class="lbl">Semantic judge · ${g.semantic.clusters} distinct meaning${g.semantic.clusters>1?'s':''}</div>
+      <div style="margin-top:6px">${esc(g.semantic.rationale||'')}</div></div>`:'';
+
+  const cards = g.versions.map((v,vi)=>{
+    if(!v.ok){
+      return `<div class="ver err"><div class="vh"><span class="run">${v.run}</span>
+        <span class="pill bad">${esc(v.error||'error')}</span></div>
+        <div class="body">— no response —</div></div>`;
+    }
+    const oi = okIdx.indexOf(vi);
+    const clusterId = g.cluster_ids[oi];
+    const selCls = oi===state.selA?'selA':oi===state.selB?'selB':'';
+    const mark = oi===state.selA?'<span class="selmark a">A</span>'
+               : oi===state.selB?'<span class="selmark b">B</span>':'';
+    const txt = versionText(v);
+    const tcNote = v.tool_calls&&v.tool_calls.length?`<span class="tc">🔧 ${v.tool_calls.length} tool call</span>`:'';
+    return `<div class="ver ${selCls}" data-oi="${oi}">${mark}
+      <div class="vh"><span class="run"><span class="cl" style="background:${cc(clusterId)}"></span> ${v.run}</span>
+        <span class="pill">${v.completion_tokens??'?'} tok</span></div>
+      <div class="body">${esc(txt).slice(0,1200)||'<em>(empty)</em>'} ${tcNote}</div></div>`;
+  }).join('');
+
+  m.innerHTML =
+    `<span class="backlink" id="back">← back to ${state.trace==='__ALL__'?'all calls':state.trace.replace('trace_','')}</span>
+     <div class="inputbox">
+       <div class="lbl">Identical input for all runs · ${g.trace.replace('trace_','')} · ${inp.n_messages} messages</div>
+       ${sysRow}${toolsRow}
+       <pre>${esc(inp.last_message||'(no text)')}</pre>
+     </div>
+     ${sem}
+     <div class="filterbar">
+       <strong>${okIdx.length} responses</strong>
+       <span class="pill ${g.metrics.distinct<=1?'good':g.metrics.distinct<=3?'warn':'bad'}">${g.metrics.distinct} distinct</span>
+       <span class="pill ${pillClass(g.metrics.mean_pairwise_lev)}">mean lev ${g.metrics.mean_pairwise_lev??'–'}</span>
+       ${g.metrics.length_cv!=null?`<span class="pill">len ${g.metrics.length_min}–${g.metrics.length_max} tok</span>`:''}
+     </div>
+     <div class="hint">Colored square = which distinct-output cluster each run fell into. Click any two cards (A, B) to diff them.</div>
+     <div class="grid">${cards}</div>
+     <div id="diffslot"></div>`;
+
+  m.querySelector('#back').onclick=()=>{ state.group=null; render(); };
+  m.querySelectorAll('.ver[data-oi]').forEach(n=>{
+    n.onclick=()=>{ pickVersion(+n.dataset.oi); };
+  });
+  renderDiff();
+  m.scrollTop=0;
+}
+
+function pickVersion(oi){
+  if(state.selA===oi){ state.selA=state.selB; state.selB=null; }
+  else if(state.selB===oi){ state.selB=null; }
+  else if(state.selA==null){ state.selA=oi; }
+  else if(state.selB==null){ state.selB=oi; }
+  else { state.selA=state.selB; state.selB=oi; }
+  // re-render just cards + diff (cheap: full detail)
+  renderDetailInPlace();
+}
+function renderDetailInPlace(){
+  const g=DATA.groups[state.group];
+  document.querySelectorAll('.ver[data-oi]').forEach(n=>{
+    const oi=+n.dataset.oi;
+    n.classList.toggle('selA',oi===state.selA);
+    n.classList.toggle('selB',oi===state.selB);
+    const old=n.querySelector('.selmark'); if(old) old.remove();
+    if(oi===state.selA){n.insertAdjacentHTML('afterbegin','<span class="selmark a">A</span>');}
+    else if(oi===state.selB){n.insertAdjacentHTML('afterbegin','<span class="selmark b">B</span>');}
+  });
+  renderDiff();
+}
+
+function renderDiff(){
+  const slot=document.getElementById('diffslot');
+  if(!slot) return;
+  const g=DATA.groups[state.group];
+  if(state.selA==null||state.selB==null||state.selA===state.selB){
+    slot.innerHTML=`<div class="diffwrap"><h3>Pick two versions (A & B) to compare</h3>
+      <div class="legend">Click one card, then another. A word-level diff and their similarity scores appear here.</div></div>`;
+    return;
+  }
+  const okIdx=g.ok_index_map;
+  const vA=g.versions[okIdx[state.selA]], vB=g.versions[okIdx[state.selB]];
+  const lev=g.lev_matrix[state.selA][state.selB];
+  const jac=g.jac_matrix[state.selA][state.selB];
+  const sameCluster=g.cluster_ids[state.selA]===g.cluster_ids[state.selB];
+  const [left,right]=diffWords(versionText(vA),versionText(vB));
+  slot.innerHTML=`<div class="diffwrap">
+    <h3>${vA.run} <span style="color:var(--muted)">vs</span> ${vB.run}
+      ${sameCluster?'<span class="pill good">identical output</span>':'<span class="pill bad">different output</span>'}</h3>
+    <div class="diffmetrics">
+      <span class="pill ${pillClass(lev)}">Levenshtein similarity ${lev!=null?(lev*100).toFixed(0)+'%':'–'}</span>
+      <span class="pill ${pillClass(jac)}">Jaccard (word overlap) ${jac!=null?(jac*100).toFixed(0)+'%':'–'}</span>
+      <span class="pill">${vA.completion_tokens??'?'} vs ${vB.completion_tokens??'?'} tokens</span>
+    </div>
+    <div class="diffcols">
+      <div class="diffcol"><h4>A · ${vA.run}</h4><div class="txt">${left||'<em>(empty)</em>'}</div></div>
+      <div class="diffcol"><h4>B · ${vB.run}</h4><div class="txt">${right||'<em>(empty)</em>'}</div></div>
+    </div>
+    <div class="legend"><del>&nbsp;red&nbsp;</del> only in A · <ins>&nbsp;green&nbsp;</ins> only in B · unmarked = shared</div>
+  </div>`;
+}
+
+function render(){
+  highlightSidebar();
+  if(state.group==null) renderMainList();
+  else renderDetail();
+}
+
+renderSidebar();
+render();
+</script>
+</body>
+</html>
