@@ -141,6 +141,7 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--data.otel_trace_replay.filter` | str | Lambda expression to filter trace records. Applied uniformly to all data sources.
 Example: "lambda x: x['benchmark'] == 'gsm8k'" or "lambda x: 'spans' in x and len(x['spans']) > 5"
 Security: Filter expressions use eval() and should only contain trusted input. |
+| `--data.otel_trace_replay.disable_output_substitution` | boolean | When True, replay each call with its recorded assistant output (text and tool calls) instead of substituting the live output from predecessor calls. Dependency timing (waiting for predecessors) is still enforced. Default False preserves faithful live-output replay. |
 | `--data.otel_trace_replay.attribute_to_header_map` | JSON | Map OTel span attributes to HTTP headers |
 | `--data.otel_trace_replay.attribute_to_label_map` | JSON | Map OTel span attributes to metrics reporting labels |
 | `--data.otel_trace_replay.bad_tool_call_handling` | Enum (none, use_recorded) | How to handle tool_calls whose function.arguments is not valid JSON. none (default): no mitigation, bytes propagate and vLLM may return HTTP 400 on the next turn. use_recorded: discard the live response and substitute the recorded assistant message at the affected slot; the recorded tool_call_id flows into the recorded role:tool successor unchanged. |
@@ -245,6 +246,7 @@ Any extra keys in the dict are passed as kwargs to datasets.load_dataset(). |
 | `--report.request_lifecycle.per_adapter_stage` | boolean | Matches report.request_lifecycle.per_adapter_stage in config |
 | `--report.request_lifecycle.percentiles` | JSON | Matches report.request_lifecycle.percentiles in config |
 | `--report.request_lifecycle.use_server_output_tokens` | boolean | Matches report.request_lifecycle.use_server_output_tokens in config |
+| `--report.request_lifecycle.max_error_messages` | int | Matches report.request_lifecycle.max_error_messages in config |
 | `--report.prometheus.summary` | boolean | Matches report.prometheus.summary in config |
 | `--report.prometheus.per_stage` | boolean | Matches report.prometheus.per_stage in config |
 | `--report.session_lifecycle.summary` | boolean | Matches report.session_lifecycle.summary in config |

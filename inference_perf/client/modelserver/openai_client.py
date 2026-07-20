@@ -266,13 +266,13 @@ class openAIModelServerClientSession(ModelServerClientSession):
                             delta = choices[0].get("delta", {})
                             if delta.get("content"):
                                 output_parts.append(delta["content"])
-                            if delta.get("reasoning_content"):
-                                reasoning_parts.append(delta["reasoning_content"])
+                            reasoning_chunk = delta.get("reasoning") or delta.get("reasoning_content")
+                            if reasoning_chunk:
+                                reasoning_parts.append(reasoning_chunk)
                             if delta.get("tool_calls"):
                                 tool_call_parts.append(delta)
 
-                        if output_parts:
-                            otel_response_info["output_text"] = "".join(output_parts)
+                        otel_response_info["output_text"] = "".join(output_parts)
                         if reasoning_parts:
                             otel_response_info["reasoning_text"] = "".join(reasoning_parts)
                         if tool_call_parts:
@@ -284,7 +284,7 @@ class openAIModelServerClientSession(ModelServerClientSession):
                         if "message" in choices[0]:
                             msg_out = choices[0].get("message", {})
                             output_text = msg_out.get("content") or ""
-                            reasoning_content = msg_out.get("reasoning_content")
+                            reasoning_content = msg_out.get("reasoning") or msg_out.get("reasoning_content")
 
                             otel_response_info["output_text"] = output_text
                             if reasoning_content:
@@ -336,8 +336,10 @@ class openAIModelServerClientSession(ModelServerClientSession):
         if data.headers:
             _update_headers_case_insensitive(headers, data.headers)
 
-        if data.session_id and self.client.api_config.session_id_header_key:
-            headers[self.client.api_config.session_id_header_key] = data.session_id
+        if self.client.api_config.session_id_header_key:
+            session_id = getattr(data, "session_id", None) or getattr(data, "user_session_id", None)
+            if session_id:
+                headers[self.client.api_config.session_id_header_key] = session_id
 
         request_data = json.dumps(payload)
 
@@ -372,7 +374,10 @@ class openAIModelServerClientSession(ModelServerClientSession):
                                 tokenizer=self.client.tokenizer,
                                 lora_adapter=lora_adapter,
                             )
-                            response_content = info.extra_info.get("raw_response", "") if info else ""
+                            # pop (not get) to release the raw SSE body from InferenceInfo immediately;
+                            # holding it in extra_info for the lifetime of the object causes unbounded
+                            # memory growth when many sessions run concurrently.
+                            response_content = info.extra_info.pop("raw_response", "") if info else ""
                         else:
                             # Read response body once to avoid double-read issue
                             response_content = await response.text()
