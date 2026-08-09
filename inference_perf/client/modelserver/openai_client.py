@@ -514,9 +514,11 @@ class openAIModelServerClientSession(ModelServerClientSession):
         if data.labels:
             info.labels = data.labels
 
+        event_id = getattr(data, "event_id", None)
         metric = RequestLifecycleMetric(
             stage_id=stage_id,
             session_id=data.session_id if isinstance(data.session_id, str) else None,
+            event_id=event_id if isinstance(event_id, str) else None,
             request_data=request_data,
             response_data=response_content,
             info=info,

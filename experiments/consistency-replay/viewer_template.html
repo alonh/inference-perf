@@ -49,6 +49,28 @@
   .pill.bad{color:var(--bad);border-color:#5d2a2a}
   .pill.info{color:var(--accent);border-color:#2a405d}
   .pill.tool{color:#c9a6ff;border-color:#43305d}
+  /* conversation timeline (per-trace view) */
+  .taskhead{background:var(--panel);border:1px solid var(--accent);border-radius:10px;
+            padding:12px 14px;margin-bottom:18px;box-shadow:0 4px 14px rgba(0,0,0,.3)}
+  .taskhead .lbl{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .taskhead pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;
+                font-size:12px;max-height:220px;overflow:auto;color:#cdd7ee}
+  .timeline{display:flex;flex-direction:column;gap:0;position:relative;margin-left:8px}
+  .step{position:relative;padding:0 0 14px 30px;cursor:pointer}
+  /* the vertical rail + node marker */
+  .step::before{content:"";position:absolute;left:8px;top:2px;bottom:-14px;width:2px;background:var(--edge)}
+  .step:last-child::before{bottom:auto;height:22px}
+  .step .node{position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;
+              background:var(--panel2);border:2px solid var(--warn);z-index:1}
+  .step.identical .node{border-color:var(--good)}
+  .step .stepcard{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:11px 13px;
+                  transition:border-color .1s}
+  .step:hover .stepcard{border-color:var(--accent)}
+  .step .steptop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .step .stepn{font-weight:700;color:var(--muted);font-size:12px}
+  .step .kind{color:var(--muted);font-size:11px}
+  .step .prev{color:var(--muted);font-size:12px;margin-top:6px;overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap;font-family:ui-monospace,Menlo,monospace}
   /* detail */
   .detail{margin-top:6px}
   .backlink{color:var(--muted);cursor:pointer;font-size:13px;margin-bottom:10px;display:inline-block}
@@ -57,9 +79,40 @@
   .inputbox .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
   .inputbox pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;
                 font-size:12px;max-height:150px;overflow:auto;color:#cdd7ee}
+  /* sticky request header on the detail view */
+  .reqhead{position:sticky;top:0;z-index:5;background:var(--panel);border:1px solid var(--accent);
+           border-radius:10px;padding:12px 14px;margin-bottom:16px;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+  .reqhead .lbl{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .reqhead pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;
+               font-size:12px;max-height:130px;overflow:auto;color:#cdd7ee}
+  /* checkbox metric picker */
+  .metricpicker{display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center;margin:4px 0 12px;
+                background:var(--panel);border:1px solid var(--edge);border-radius:9px;padding:9px 12px}
+  .metricpicker .pl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-right:4px}
+  .metricpicker label{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer}
+  .metricpicker input{accent-color:var(--accent);cursor:pointer}
+  /* collapsible paper summary in the overview */
+  details.papersum{margin-top:6px}
+  details.papersum > summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--ink);
+       padding:10px 12px;background:var(--panel);border:1px solid var(--edge);border-radius:10px;list-style:none}
+  details.papersum > summary::-webkit-details-marker{display:none}
+  details.papersum > summary::before{content:"▸ ";color:var(--muted)}
+  details.papersum[open] > summary::before{content:"▾ "}
+  details.papersum > summary .mut{font-weight:400}
   .sysrow{color:var(--muted);font-size:11px;margin-bottom:8px}
   .hint{color:var(--muted);font-size:12px;margin:6px 0 12px}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  /* clustered examples in the detail view */
+  .cluster{border:1px solid var(--edge);border-radius:11px;padding:12px;margin-bottom:14px;background:#131a29}
+  .clusterhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;
+               padding-top:10px;border-top:1px dashed var(--edge);font-size:12px}
+  .clusterhead .cl{width:14px;height:14px;border-radius:4px;display:inline-block}
+  .clusterhead .runs{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:11px}
+  .ver .runs{color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:10.5px;margin-bottom:6px;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .errline{color:var(--muted);font-size:12px;margin:6px 0 14px;padding:8px 12px;
+           background:var(--panel);border:1px solid var(--edge);border-radius:9px}
+  .errline .mut{color:var(--bad)}
   .ver{background:var(--panel);border:1px solid var(--edge);border-radius:9px;padding:10px;cursor:pointer;
        position:relative;transition:border-color .1s}
   .ver:hover{border-color:var(--accent)}
@@ -94,6 +147,34 @@
   .filterbar select,.filterbar input{background:var(--panel);color:var(--ink);border:1px solid var(--edge);
        border-radius:7px;padding:6px 9px;font-size:13px}
   .empty{color:var(--muted);padding:40px;text-align:center}
+  /* paper-metrics section (now rendered inside the overview) */
+  .papers h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:22px 0 10px}
+  .papers h2:first-child{margin-top:0}
+  .verdict{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--edge);font-weight:600}
+  .verdict.ok{color:var(--good);border-color:#2a5d40}
+  .verdict.no{color:var(--bad);border-color:#5d2a2a}
+  .heatctl{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  table.heat{border-collapse:collapse;font-size:11px}
+  table.heat th{color:var(--muted);font-weight:600;font-family:ui-monospace,Menlo,monospace;
+       padding:3px 5px;text-align:center}
+  table.heat th.rowh{text-align:right;padding-right:8px}
+  table.heat td.cell{width:34px;height:30px;text-align:center;cursor:default;border:1px solid var(--bg);
+       color:#0c1220;font-weight:600;font-size:10px}
+  table.heat td.cell.diag{opacity:.55}
+  table.heat td.na{color:var(--muted);background:var(--panel)}
+  .heattip{margin-top:10px;background:#121a2b;border:1px solid var(--edge);border-radius:8px;padding:10px 12px;
+       min-height:20px;font-size:12px}
+  .heattip .pair{font-family:ui-monospace,Menlo,monospace;color:var(--accent);margin-bottom:6px}
+  .mmdtable{width:100%;border-collapse:collapse;font-size:13px}
+  .mmdtable th,.mmdtable td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--edge)}
+  .mmdtable th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  .outlier{color:var(--warn);font-size:12px;margin-top:8px}
+  .papers .card h3{margin:0 0 8px;font-size:13px}
+  .papers .big{font-size:30px;font-weight:700;line-height:1.1}
+  .papers .mut{color:var(--muted);font-size:12px;margin-top:3px}
+  .papers code{background:var(--panel2);border:1px solid var(--edge);border-radius:4px;padding:1px 5px;font-size:12px}
+  .papers select{background:var(--panel);color:var(--ink);border:1px solid var(--edge);border-radius:7px;padding:5px 8px;font-size:13px}
+  .papers .mmdtable td:first-child{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -101,6 +182,7 @@
   <h1>Output Consistency — same input, 10 runs</h1>
   <div class="sub" id="subtitle"></div>
 </header>
+
 <div class="wrap">
   <aside class="side">
     <h2>Overview</h2>
@@ -113,12 +195,39 @@
 </div>
 
 <script id="data" type="application/json">__DATA__</script>
+<script id="papers-data" type="application/json">__PAPERS__</script>
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
+const PAPERS = JSON.parse(document.getElementById('papers-data').textContent);  // null when --papers omitted
 const CLUSTER_COLORS = ['#6ea8fe','#3ddc84','#ffcf5c','#ff6b6b','#c9a6ff','#4dd0e1','#f78fb3','#a3e635','#fb923c','#e879f9'];
 function cc(i){return CLUSTER_COLORS[i % CLUSTER_COLORS.length];}
 
-let state = {trace:'__ALL__', group:null, selA:null, selB:null};
+// Paper + output metrics: labels, canonical order (cards / picker / heatmap), and a short
+// gloss. All seven are similarities in [0,1] where higher = more consistent, so the pill
+// coloring uses pillClass(v, goodHigh=true) uniformly.
+const METRIC_LABELS = {
+  output_exact_match: 'Exact match',
+  output_levenshtein: 'Content similarity',
+  output_jaccard: 'Output Jaccard',
+  tss: 'TSS (tool-seq)',
+  ac: 'AC (arguments)',
+  js_kernel: 'JS kernel',
+  gak: 'GAK (ordering)',
+};
+const METRIC_ORDER = ['output_exact_match','output_levenshtein','output_jaccard','tss','ac','js_kernel','gak'];
+const METRIC_GLOSS = {
+  output_exact_match: 'content + tool-args byte-identical',
+  output_levenshtein: 'graded text similarity (difflib)',
+  output_jaccard: 'word-set overlap',
+  tss: 'tool-name-sequence similarity',
+  ac: 'argument agreement (n/a if no tool call)',
+  js_kernel: 'action composition (which tools)',
+  gak: 'action ordering (what order)',
+};
+
+let state = {trace:'__ALL__', group:null, selA:null, selB:null,
+  selMetrics:['output_levenshtein','output_jaccard'],  // which pair-metrics show in the diff
+  pcond:null, pmetric:'output_levenshtein'};
 
 // ---- helpers ----
 function pillClass(v, goodHigh=true){
@@ -129,22 +238,43 @@ function pillClass(v, goodHigh=true){
 function fmtPct(v){return v==null?'–':(v*100).toFixed(0)+'%';}
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 
-// word-level LCS diff
+// Character-level diff that IGNORES WHITESPACE. Whitespace characters (spaces, newlines,
+// indentation) are dropped before the LCS is computed, so a difference that is only
+// formatting — a newline vs a space, pretty-printed vs compact JSON — produces NO
+// highlights. The ORIGINAL text (whitespace and all) is rendered verbatim on each side;
+// only the non-whitespace characters that genuinely differ get <ins>/<del> marks.
 function diffWords(a,b){
-  const A=a.split(/(\s+)/), B=b.split(/(\s+)/);
-  const n=A.length,m=B.length;
+  // Non-whitespace chars + their original indices.
+  const ca=[], ia=[]; for(let k=0;k<a.length;k++){ if(!/\s/.test(a[k])){ca.push(a[k]);ia.push(k);} }
+  const cb=[], ib=[]; for(let k=0;k<b.length;k++){ if(!/\s/.test(b[k])){cb.push(b[k]);ib.push(k);} }
+  const n=ca.length,m=cb.length;
+  // LCS over the whitespace-free sequences.
   const dp=Array.from({length:n+1},()=>new Int32Array(m+1));
   for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)
-    dp[i][j]=A[i]===B[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
-  let i=0,j=0,left='',right='';
+    dp[i][j]=ca[i]===cb[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+  // shared[k] = true if the k-th non-ws char of A (resp. B) is part of the LCS (unchanged).
+  const sharedA=new Array(n).fill(false), sharedB=new Array(m).fill(false);
+  let i=0,j=0;
   while(i<n&&j<m){
-    if(A[i]===B[j]){left+=esc(A[i]);right+=esc(B[j]);i++;j++;}
-    else if(dp[i+1][j]>=dp[i][j+1]){left+='<del>'+esc(A[i])+'</del>';i++;}
-    else {right+='<ins>'+esc(B[j])+'</ins>';j++;}
+    if(ca[i]===cb[j]){sharedA[i]=true;sharedB[j]=true;i++;j++;}
+    else if(dp[i+1][j]>=dp[i][j+1]) i++;
+    else j++;
   }
-  while(i<n){left+='<del>'+esc(A[i])+'</del>';i++;}
-  while(j<m){right+='<ins>'+esc(B[j])+'</ins>';j++;}
-  return [left,right];
+  // Render originals: whitespace always plain; non-ws marked when not shared.
+  const render=(s,idxs,shared,tag)=>{
+    let out='',p=0;
+    for(let k=0;k<idxs.length;k++){
+      out+=esc(s.slice(p,idxs[k]));            // whitespace/plain run before this char
+      const ch=esc(s[idxs[k]]);
+      out+= shared[k] ? ch : `<${tag}>${ch}</${tag}>`;
+      p=idxs[k]+1;
+    }
+    out+=esc(s.slice(p));                        // trailing run
+    return out;
+  };
+  // Merge adjacent same-tag chars so we don't emit one <del> per character.
+  const tidy=h=>h.replace(/<\/(ins|del)>(<\1>)/g,'');
+  return [tidy(render(a,ia,sharedA,'del')), tidy(render(b,ib,sharedB,'ins'))];
 }
 
 function versionText(v){
@@ -233,27 +363,134 @@ function renderList(){
 function renderMainList(){
   const m=document.getElementById('main');
   const title = state.trace==='__ALL__'?'All call positions':state.trace.replace('trace_','');
+  // On the "All traces" overview, fold the aggregate paper metrics (θ, H1, run×run
+  // heatmap, MMD) into a collapsible section below the dashboard — the old "Paper metrics"
+  // tab, re-homed. Only shown when paper data was injected via --papers.
+  const paperSection = (state.trace==='__ALL__' && PAPERS && PAPERS.conditions
+      && Object.keys(PAPERS.conditions).length)
+    ? `<details class="papersum"><summary>Paper-grounded summary
+         <span class="mut">— U-statistic θ, Hypothesis 1, run×run heatmap, MMD</span></summary>
+         <div class="papers" id="papers"></div></details>`
+    : '';
   m.innerHTML = renderDash() +
     `<div class="filterbar"><strong>${title}</strong>
       <span class="hint">— click a call to compare its ${DATA.meta.n_runs} versions side by side</span></div>` +
-    renderList();
+    renderList() + paperSection;
   m.querySelectorAll('.grow').forEach(n=>{
     n.onclick=()=>{ state.group=+n.dataset.gi; state.selA=null; state.selB=null; render(); };
   });
+  if(paperSection) renderPapers();
   m.scrollTop=0;
+}
+
+// ---- conversation timeline (one trace, steps in order) ----
+function renderTimeline(){
+  const m=document.getElementById('main');
+  // Steps of this one conversation, in send order. n_messages is a unique, monotonic
+  // step-order key within a trace (verified), so it recovers the exact turn sequence.
+  const steps = groupsForTrace().slice().sort(
+    (a,b)=>(a.input.n_messages||0)-(b.input.n_messages||0));
+  if(!steps.length){
+    m.innerHTML = `<div class="empty">No comparable calls for this trace.</div>`;
+    return;
+  }
+  const first = steps[0].input;
+  const sysRow = first.system_head
+    ? `<div class="sysrow">system prompt: ${esc(first.system_head.slice(0,200))}…</div>`:'';
+  const toolsRow = first.tools&&first.tools.length
+    ? `<div class="sysrow">tools available: ${esc(first.tools.join(', '))}</div>`:'';
+  const taskText = first.first_message || first.last_message || '(no text)';
+  const taskHead = `<div class="taskhead">
+      <div class="lbl">Original task · ${state.trace.replace('trace_','')} · ${steps.length} model call${steps.length>1?'s':''} in this conversation</div>
+      ${sysRow}${toolsRow}
+      <pre>${esc(taskText)}</pre>
+    </div>`;
+
+  const rows = steps.map((g,i)=>{
+    const gi = DATA.groups.indexOf(g);
+    const md = g.metrics;
+    const identical = md.all_identical;
+    // What the model saw at this step: step 1 = the task (user); later = a tool result.
+    const kind = i===0
+      ? `${esc(g.input.first_role||'user')} → assistant`
+      : `${esc(g.input.last_role||'tool')} result → assistant`;
+    const prev = esc((g.input.last_message||'').slice(0,160)) || '(no text input)';
+    const okPill = `<span class="pill info">${md.n_ok}/${md.n_runs} ok</span>`;
+    const agree = identical
+      ? `<span class="pill good">✓ all ${md.n_ok} agree</span>`
+      : `<span class="pill ${md.distinct<=3?'warn':'bad'}">${md.distinct} distinct</span>`;
+    const levPill = `<span class="pill ${pillClass(md.mean_pairwise_lev)}">lev ${md.mean_pairwise_lev??'–'}</span>`;
+    const sem = g.semantic&&g.semantic.clusters!=null
+      ? `<span class="pill ${g.semantic.clusters<=1?'good':g.semantic.clusters<=2?'warn':'bad'}">${g.semantic.clusters} meaning${g.semantic.clusters>1?'s':''}</span>`:'';
+    const tool = md.is_tool_turn?`<span class="pill tool">tool call</span>`:'';
+    return `<div class="step ${identical?'identical':''}" data-gi="${gi}">
+      <span class="node"></span>
+      <div class="stepcard">
+        <div class="steptop">
+          <span class="stepn">Step ${i+1}</span>
+          <span class="kind">${kind}</span>
+          ${okPill}${agree}${levPill}${sem}${tool}
+        </div>
+        <div class="prev">▸ ${prev}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  m.innerHTML = taskHead +
+    `<div class="filterbar"><strong>Conversation timeline</strong>
+      <span class="hint">— each step is one model call replayed ${DATA.meta.n_runs}×; click a step to compare its responses</span></div>` +
+    `<div class="timeline">${rows}</div>`;
+  m.querySelectorAll('.step[data-gi]').forEach(n=>{
+    n.onclick=()=>{ state.group=+n.dataset.gi; state.selA=null; state.selB=null; render(); };
+  });
+  m.scrollTop=0;
+}
+
+// Two-stage clustering for the detail view.
+//  Stage 1 (whitespace-INSENSITIVE): g.cluster_ids — how many distinct outputs there are.
+//  Stage 2 (whitespace-SENSITIVE): within a stage-1 cluster, sub-group by the exact raw
+//    display text, so runs that differ only by formatting each get one example.
+// Returns [{cid, ois:[all ok-idx in cluster], variants:[{rep:oi, ois:[oi...]}]}] ordered by
+// first appearance, variants ordered by size then first appearance.
+function clusterStructure(g){
+  const okIdx=g.ok_index_map;
+  const byCid=new Map();
+  okIdx.forEach((vi,oi)=>{
+    const cid=g.cluster_ids[oi];
+    if(!byCid.has(cid)) byCid.set(cid,[]);
+    byCid.get(cid).push(oi);
+  });
+  const clusters=[];
+  byCid.forEach((ois,cid)=>{
+    const byRaw=new Map();
+    ois.forEach(oi=>{
+      const raw=versionText(g.versions[okIdx[oi]]);
+      if(!byRaw.has(raw)) byRaw.set(raw,[]);
+      byRaw.get(raw).push(oi);
+    });
+    const variants=[...byRaw.values()]
+      .map(vo=>({rep:vo[0], ois:vo}))
+      .sort((a,b)=> b.ois.length-a.ois.length || a.rep-b.rep);
+    clusters.push({cid, ois, variants, first:Math.min(...ois)});
+  });
+  clusters.sort((a,b)=> a.first-b.first);
+  return clusters;
+}
+function runNames(g, ois){
+  const okIdx=g.ok_index_map;
+  return ois.map(oi=>g.versions[okIdx[oi]].run);
 }
 
 function renderDetail(){
   const g=DATA.groups[state.group];
   const m=document.getElementById('main');
   const okIdx=g.ok_index_map;
-  // default selection: first two distinct clusters if possible
+  const clusters=clusterStructure(g);
+  // default selection: representatives of the first two distinct clusters if possible.
   if(state.selA==null||state.selB==null){
-    state.selA=0;
-    let b=1;
-    for(let k=1;k<okIdx.length;k++){ if(g.cluster_ids[k]!==g.cluster_ids[0]){b=k;break;} }
-    state.selB=Math.min(b,okIdx.length-1);
-    if(okIdx.length<2) state.selB=0;
+    state.selA=clusters[0]?clusters[0].variants[0].rep:0;
+    state.selB=clusters[1]?clusters[1].variants[0].rep
+             :(clusters[0]&&clusters[0].variants[1]?clusters[0].variants[1].rep:state.selA);
   }
   const inp=g.input;
   const sysRow = inp.system_head
@@ -265,46 +502,82 @@ function renderDetail(){
       <div class="lbl">Semantic judge · ${g.semantic.clusters} distinct meaning${g.semantic.clusters>1?'s':''}</div>
       <div style="margin-top:6px">${esc(g.semantic.rationale||'')}</div></div>`:'';
 
-  const cards = g.versions.map((v,vi)=>{
-    if(!v.ok){
-      return `<div class="ver err"><div class="vh"><span class="run">${v.run}</span>
-        <span class="pill bad">${esc(v.error||'error')}</span></div>
-        <div class="body">— no response —</div></div>`;
-    }
-    const oi = okIdx.indexOf(vi);
-    const clusterId = g.cluster_ids[oi];
+  // One representative card per stage-2 raw variant, grouped under its stage-1 cluster.
+  // Only examples are shown — not all 10 runs — with each cluster/variant listing its runs.
+  const oneCard=(oi, variant, cid)=>{
+    const v=g.versions[okIdx[oi]];
     const selCls = oi===state.selA?'selA':oi===state.selB?'selB':'';
     const mark = oi===state.selA?'<span class="selmark a">A</span>'
                : oi===state.selB?'<span class="selmark b">B</span>':'';
     const txt = versionText(v);
     const tcNote = v.tool_calls&&v.tool_calls.length?`<span class="tc">🔧 ${v.tool_calls.length} tool call</span>`:'';
-    return `<div class="ver ${selCls}" data-oi="${oi}">${mark}
-      <div class="vh"><span class="run"><span class="cl" style="background:${cc(clusterId)}"></span> ${v.run}</span>
-        <span class="pill">${v.completion_tokens??'?'} tok</span></div>
+    const names=runNames(g,variant.ois);
+    const runLabel = names.length>1
+      ? `${names[0]} <span class="pill">+${names.length-1} more</span>`
+      : names[0];
+    return `<div class="ver ${selCls}" data-oi="${oi}" title="${esc(names.join(', '))}">${mark}
+      <div class="vh"><span class="run"><span class="cl" style="background:${cc(cid)}"></span> ${runLabel}</span>
+        <span class="pill">${v.completion_tokens??'?'} tok · ${variant.ois.length} run${variant.ois.length>1?'s':''}</span></div>
+      <div class="runs">${esc(names.join(', '))}</div>
       <div class="body">${esc(txt).slice(0,1200)||'<em>(empty)</em>'} ${tcNote}</div></div>`;
+  };
+  const clusterBlocks = clusters.map((cl,ci)=>{
+    const names=runNames(g,cl.ois);
+    const wsNote = cl.variants.length>1
+      ? `<span class="pill warn">${cl.variants.length} whitespace variants</span>`:'';
+    const head=`<div class="clusterhead">
+        <span class="cl" style="background:${cc(cl.cid)}"></span>
+        <strong>Cluster ${String.fromCharCode(65+ci)}</strong>
+        <span class="pill info">${cl.ois.length} run${cl.ois.length>1?'s':''}</span>${wsNote}
+        <span class="runs">${esc(names.join(', '))}</span>
+      </div>`;
+    const vcards=cl.variants.map(varnt=>oneCard(varnt.rep, varnt, cl.cid)).join('');
+    return `<div class="cluster"><div class="grid">${vcards}</div>${head}</div>`;
   }).join('');
+  // Errored runs (no ok response) listed compactly, not as example cards.
+  const errRuns=g.versions.filter(v=>!v.ok);
+  const errBlock = errRuns.length
+    ? `<div class="errline">${errRuns.length} run${errRuns.length>1?'s':''} errored: ${
+        errRuns.map(v=>`${esc(v.run)} <span class="mut">(${esc(v.error||'error')})</span>`).join(', ')}</div>`
+    : '';
+
+  // Request pinned at the top: the identical input every run saw for this call position.
+  const metricPicker = `<div class="metricpicker"><span class="pl">metrics on A↔B</span>${
+    METRIC_ORDER.map(mk=>`<label title="${esc(METRIC_GLOSS[mk]||'')}">
+      <input type="checkbox" data-metric="${mk}" ${state.selMetrics.includes(mk)?'checked':''}>
+      ${esc(METRIC_LABELS[mk]||mk)}</label>`).join('')}</div>`;
 
   m.innerHTML =
     `<span class="backlink" id="back">← back to ${state.trace==='__ALL__'?'all calls':state.trace.replace('trace_','')}</span>
-     <div class="inputbox">
-       <div class="lbl">Identical input for all runs · ${g.trace.replace('trace_','')} · ${inp.n_messages} messages</div>
+     <div class="reqhead">
+       <div class="lbl">Request · ${g.trace.replace('trace_','')} · call ${esc(g.request_hash)} · ${inp.n_messages} messages · identical for all runs</div>
        ${sysRow}${toolsRow}
        <pre>${esc(inp.last_message||'(no text)')}</pre>
      </div>
      ${sem}
      <div class="filterbar">
-       <strong>${okIdx.length} responses</strong>
+       <strong>${okIdx.length} responses → ${clusters.length} distinct output${clusters.length>1?'s':''}</strong>
        <span class="pill ${g.metrics.distinct<=1?'good':g.metrics.distinct<=3?'warn':'bad'}">${g.metrics.distinct} distinct</span>
        <span class="pill ${pillClass(g.metrics.mean_pairwise_lev)}">mean lev ${g.metrics.mean_pairwise_lev??'–'}</span>
        ${g.metrics.length_cv!=null?`<span class="pill">len ${g.metrics.length_min}–${g.metrics.length_max} tok</span>`:''}
      </div>
-     <div class="hint">Colored square = which distinct-output cluster each run fell into. Click any two cards (A, B) to diff them.</div>
-     <div class="grid">${cards}</div>
+     ${metricPicker}
+     <div class="hint">Showing one example per distinct output (whitespace-insensitive clusters); within a cluster, formatting-only variants each get an example. Each card lists the runs it represents. Click any two example cards (A, B) to diff them; ticked metrics show for that pair.</div>
+     ${clusterBlocks}
+     ${errBlock}
      <div id="diffslot"></div>`;
 
   m.querySelector('#back').onclick=()=>{ state.group=null; render(); };
   m.querySelectorAll('.ver[data-oi]').forEach(n=>{
     n.onclick=()=>{ pickVersion(+n.dataset.oi); };
+  });
+  m.querySelectorAll('.metricpicker input[data-metric]').forEach(cb=>{
+    cb.onchange=()=>{
+      const mk=cb.dataset.metric;
+      if(cb.checked){ if(!state.selMetrics.includes(mk)) state.selMetrics.push(mk); }
+      else { state.selMetrics = state.selMetrics.filter(x=>x!==mk); }
+      renderDiff();
+    };
   });
   renderDiff();
   m.scrollTop=0;
@@ -343,16 +616,22 @@ function renderDiff(){
   }
   const okIdx=g.ok_index_map;
   const vA=g.versions[okIdx[state.selA]], vB=g.versions[okIdx[state.selB]];
-  const lev=g.lev_matrix[state.selA][state.selB];
-  const jac=g.jac_matrix[state.selA][state.selB];
   const sameCluster=g.cluster_ids[state.selA]===g.cluster_ids[state.selB];
   const [left,right]=diffWords(versionText(vA),versionText(vB));
+  // One pill per ticked metric, read from the per-pair matrices for THIS call position.
+  const pm = g.pair_metrics || {};
+  const metricPills = (state.selMetrics.length ? state.selMetrics : ['output_levenshtein'])
+    .filter(mk=>pm[mk])
+    .map(mk=>{
+      const v = pm[mk][state.selA][state.selB];
+      const disp = (v==null || isNaN(v)) ? 'n/a' : (v*100).toFixed(0)+'%';
+      return `<span class="pill ${v==null?'info':pillClass(v)}" title="${esc(METRIC_GLOSS[mk]||'')}">${esc(METRIC_LABELS[mk]||mk)} ${disp}</span>`;
+    }).join('');
   slot.innerHTML=`<div class="diffwrap">
     <h3>${vA.run} <span style="color:var(--muted)">vs</span> ${vB.run}
       ${sameCluster?'<span class="pill good">identical output</span>':'<span class="pill bad">different output</span>'}</h3>
     <div class="diffmetrics">
-      <span class="pill ${pillClass(lev)}">Levenshtein similarity ${lev!=null?(lev*100).toFixed(0)+'%':'–'}</span>
-      <span class="pill ${pillClass(jac)}">Jaccard (word overlap) ${jac!=null?(jac*100).toFixed(0)+'%':'–'}</span>
+      ${metricPills || '<span class="pill info">no metric selected</span>'}
       <span class="pill">${vA.completion_tokens??'?'} vs ${vB.completion_tokens??'?'} tokens</span>
     </div>
     <div class="diffcols">
@@ -365,8 +644,189 @@ function renderDiff(){
 
 function render(){
   highlightSidebar();
-  if(state.group==null) renderMainList();
-  else renderDetail();
+  if(state.group!=null) renderDetail();
+  else if(state.trace==='__ALL__') renderMainList();   // cross-trace overview + paper summary
+  else renderTimeline();                                // one trace = conversation timeline
+}
+
+// ================= Paper metrics (aggregate summary in the overview) =================
+function heatColor(v){
+  // bad(red) → warn(amber) → good(green), matching the .bar gradient feel.
+  if(v==null || isNaN(v)) return '#2a2f3a';
+  const stops = [[0,[255,107,107]],[0.6,[255,207,92]],[0.85,[61,220,132]],[1,[61,220,132]]];
+  let lo=stops[0], hi=stops[stops.length-1];
+  for(let i=0;i<stops.length-1;i++){ if(v>=stops[i][0] && v<=stops[i+1][0]){lo=stops[i];hi=stops[i+1];break;} }
+  const t = hi[0]===lo[0] ? 0 : (v-lo[0])/(hi[0]-lo[0]);
+  const c = lo[1].map((x,k)=>Math.round(x+(hi[1][k]-x)*t));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function offDiagMean(mat){
+  let s=0,n=0;
+  for(let i=0;i<mat.length;i++) for(let j=0;j<mat.length;j++){
+    if(i===j) continue;
+    const v=mat[i][j];
+    if(v!=null && !isNaN(v)){ s+=v; n++; }
+  }
+  return n? s/n : null;
+}
+
+function paperPairLookup(rpm){
+  // rpm.pairs is a dict keyed "runA|runB" whose value holds the metrics inline.
+  // Return a lookup keyed "runA runB" (both directions) -> metric object.
+  const idx={};
+  const pairs = rpm.pairs || {};
+  Object.keys(pairs).forEach(k=>{
+    const parts = k.split('|'); const a=parts[0], b=parts[1];
+    idx[a+' '+b]=pairs[k];
+    idx[b+' '+a]=pairs[k];
+  });
+  return idx;
+}
+
+function renderPapers(){
+  const host = document.getElementById('papers');
+  if(!host) return;  // no host (e.g. no paper data) — overview omits the section
+  if(!PAPERS || !PAPERS.conditions || !Object.keys(PAPERS.conditions).length){
+    host.innerHTML = `<div class="card" style="max-width:640px"><h3>No paper-metrics data</h3>
+      <p class="mut">Build the viewer with <code>--papers analysis_papers.json</code> (produced by
+      <code>consistency_statistics.py</code>) to populate this section.</p></div>`;
+    return;
+  }
+  const names = Object.keys(PAPERS.conditions);
+  if(state.pcond==null || !PAPERS.conditions[state.pcond]) state.pcond = names[0];
+  const cond = PAPERS.conditions[state.pcond];
+  const rpm = cond.run_pair_matrix;
+  const u = cond.u_statistic;
+  const traj = cond.trajectory_u_statistic;  // {js:{...}, gak:{...}} or undefined (older JSON)
+  const h1 = cond.h1;
+
+  let html = '';
+
+  // --- condition selector ---
+  if(names.length>1){
+    html += `<div class="heatctl"><label>Condition&nbsp;
+      <select id="pcondsel">${names.map(n=>`<option value="${esc(n)}" ${n===state.pcond?'selected':''}>${esc(n)}</option>`).join('')}</select>
+      </label></div>`;
+  } else {
+    html += `<div class="mut" style="margin-bottom:12px">Condition: <b>${esc(state.pcond)}</b></div>`;
+  }
+
+  // --- stat cards ---
+  html += '<div class="dash">';
+  if(u){
+    html += `<div class="card"><h3>U-statistic θ <span class="mut">(Raj et&nbsp;al.)</span></h3>
+      <div class="big">${u.theta!=null?u.theta.toFixed(3):'–'}</div>
+      <div class="mut">95% CI [${u.ci_low!=null?u.ci_low.toFixed(3):'–'}, ${u.ci_high!=null?u.ci_high.toFixed(3):'–'}]</div>
+      <div class="mut">kernel: ${esc(u.kernel||'?')} · ${u.n_instances||0} instances</div></div>`;
+  }
+  if(traj){
+    const tcard = (t, title, sub) => {
+      if(!t) return '';
+      const th = t.theta!=null ? t.theta.toFixed(3) : '–';
+      const ci = (t.ci_low!=null && t.ci_high!=null) ? `95% CI [${t.ci_low.toFixed(3)}, ${t.ci_high.toFixed(3)}]` : (t.note||'');
+      return `<div class="card"><h3>${title} <span class="mut">(Raj — trajectory)</span></h3>
+        <div class="big">${th}</div>
+        <div class="mut">${esc(ci)}</div>
+        <div class="mut">${esc(sub)} · ${t.n_instances||0} instances</div></div>`;
+    };
+    html += tcard(traj.js,  'Trajectory θ — composition', 'JS kernel over action histograms');
+    html += tcard(traj.gak, 'Trajectory θ — ordering',    'Global Alignment Kernel over tool order');
+  }
+  if(h1){
+    const ok = h1.supports_h1;
+    html += `<div class="card"><h3>Hypothesis&nbsp;1 <span class="mut">(Yagubyan)</span></h3>
+      <div class="verdict ${ok?'ok':'no'}">${ok?'TSS ≫ AC — supported':'TSS ≈ AC — not supported'}</div>
+      <div class="mut">mean TSS ${h1.mean_tss!=null?h1.mean_tss.toFixed(3):'–'} · mean AC ${h1.mean_ac!=null?h1.mean_ac.toFixed(3):'–'} · gap ${h1.gap!=null?h1.gap.toFixed(3):'–'}</div>
+      <div class="mut">structure stable, arguments vary</div></div>`;
+  }
+  // per-metric off-diagonal means
+  let cells='';
+  METRIC_ORDER.forEach(m=>{
+    const mat = rpm.matrices && rpm.matrices[m];
+    if(!mat) return;
+    const mean = offDiagMean(mat);
+    cells += `<tr><td>${METRIC_LABELS[m]||m}</td><td style="text-align:right"><b>${mean!=null?mean.toFixed(3):'–'}</b></td></tr>`;
+  });
+  html += `<div class="card"><h3>Mean pairwise agreement</h3>
+    <table class="mmdtable">${cells}</table>
+    <div class="mut">averaged over all off-diagonal run pairs</div></div>`;
+  html += '</div>';  // .dash
+
+  // --- run×run heatmap ---
+  const runIds = rpm.run_ids||[];
+  const availMetrics = METRIC_ORDER.filter(m=>rpm.matrices && rpm.matrices[m]);
+  if(state.pmetric==null || !rpm.matrices[state.pmetric]) state.pmetric = availMetrics[0];
+  const mat = rpm.matrices[state.pmetric];
+  const pidx = paperPairLookup(rpm);
+  const outScore = rpm.outlier_score || {};
+  const maxOut = Math.max(0, ...Object.values(outScore));
+
+  html += `<h2 style="margin-top:20px">Run × run — <span id="phm-label">${METRIC_LABELS[state.pmetric]||state.pmetric}</span></h2>`;
+  html += `<div class="heatctl"><label>Metric&nbsp;
+    <select id="pmetricsel">${availMetrics.map(m=>`<option value="${m}" ${m===state.pmetric?'selected':''}>${METRIC_LABELS[m]||m}</option>`).join('')}</select></label>
+    <span class="mut">hover a cell for the full metric set of that run pair</span></div>`;
+
+  html += '<table class="heat"><tr><th></th>';
+  runIds.forEach(r=>{ html += `<th>${esc(r)}</th>`; });
+  html += '</tr>';
+  runIds.forEach((rA,i)=>{
+    const isOut = maxOut>0.001 && (outScore[rA]!=null) && Math.abs(outScore[rA]-maxOut)<1e-9;
+    html += `<tr><th class="rowh${isOut?' outlier':''}">${esc(rA)}${isOut?' ⚠':''}</th>`;
+    runIds.forEach((rB,j)=>{
+      const diag = i===j;
+      const v = mat[i][j];
+      const disp = diag ? '' : (v==null||isNaN(v) ? '' : v.toFixed(2));
+      const naC = (!diag && (v==null||isNaN(v))) ? ' na' : '';
+      const full = pidx[rA+' '+rB];
+      const tip = diag ? '' : (full ? METRIC_ORDER.filter(m=>full[m]!=null).map(m=>`${METRIC_LABELS[m]||m}: ${(+full[m]).toFixed(3)}`).join(' · ') : '');
+      const bg = naC ? '' : `background:${heatColor(diag?1:v)}`;
+      html += `<td class="cell${diag?' diag':''}${naC}" style="${bg}" data-tip="${esc(tip)}" data-pair="${esc(rA)} × ${esc(rB)}">${disp}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</table>';
+  html += `<div class="heattip" id="heattip"><span class="mut">Hover a cell to see that run pair's full metric set.</span></div>`;
+  if(maxOut>0.001){
+    const outs = runIds.filter(r=>outScore[r]!=null).sort((a,b)=>outScore[b]-outScore[a]).slice(0,3);
+    html += `<div class="outlier">Most divergent runs (1 − mean content similarity to others): ${outs.map(r=>`<b>${esc(r)}</b> ${(outScore[r]).toFixed(3)}`).join(' · ')}</div>`;
+  }
+
+  // --- MMD table ---
+  html += `<h2 style="margin-top:20px">Cross-condition MMD <span class="mut">(Raj et&nbsp;al., trajectory distributions)</span></h2>`;
+  if(PAPERS.mmd && PAPERS.mmd.length){
+    let rows='';
+    PAPERS.mmd.forEach(m=>{
+      const p = m.p_value==null ? '–' : m.p_value.toFixed(3);
+      rows += `<tr><td>${esc(m.condition_a)} vs ${esc(m.condition_b)}</td><td>${esc(m.kernel)}</td>
+        <td style="text-align:right">${m.mmd2!=null?m.mmd2.toFixed(4):'–'}</td><td style="text-align:right">${p}</td></tr>`;
+    });
+    html += `<table class="mmdtable"><tr><th>condition pair</th><th>kernel</th><th style="text-align:right">MMD²</th><th style="text-align:right">p-value</th></tr>${rows}</table>
+      <div class="mut" style="margin-top:6px">MMD²≈0 with high p ⇒ the two conditions' trajectory distributions are statistically indistinguishable.</div>`;
+  } else {
+    html += `<div class="mut">Single condition — MMD needs ≥2. Re-run the analyzer with
+      <code>--condition A=dirA --condition B=dirB --perm 200</code>.</div>`;
+  }
+
+  host.innerHTML = html;
+
+  // wire selectors
+  const cs = document.getElementById('pcondsel');
+  if(cs) cs.onchange = e=>{ state.pcond=e.target.value; state.pmetric='output_levenshtein'; renderPapers(); };
+  const ms = document.getElementById('pmetricsel');
+  if(ms) ms.onchange = e=>{ state.pmetric=e.target.value; renderPapers(); };
+
+  // hover -> fill the static tooltip panel below the heatmap
+  const tip = document.getElementById('heattip');
+  const tipDefault = `<span class="mut">Hover a cell to see that run pair's full metric set.</span>`;
+  host.querySelectorAll('td.cell').forEach(td=>{
+    td.onmouseenter = ()=>{
+      const t = td.getAttribute('data-tip');
+      if(!t){ tip.innerHTML = `<span class="pair">${esc(td.getAttribute('data-pair'))}</span> <span class="mut">(self)</span>`; return; }
+      tip.innerHTML = `<span class="pair">${esc(td.getAttribute('data-pair'))}</span><br>${esc(t)}`;
+    };
+    td.onmouseleave = ()=>{ tip.innerHTML = tipDefault; };
+  });
 }
 
 renderSidebar();

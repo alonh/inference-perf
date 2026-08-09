@@ -15,9 +15,12 @@
 """Analyze output consistency across repeated replay runs.
 
 Given N run directories each containing per_request_lifecycle_metrics.json, group the
-requests by (session_id, request-payload hash). Because the experiment runs with
-disable_output_substitution=true, a given (trace, call-position) is fed byte-identical
-input on every run, so each group holds the repeated outputs for ONE identical input.
+requests by event_id. Each record carries a session_id (the source trace) and an
+event_id (a stable identifier for one call position within that trace, of the form
+"<session_id>:event_<NNN>_<hash>"). Because the experiment runs with
+disable_output_substitution=true, a given event_id is fed byte-identical input on every
+run, so each event_id group holds the repeated outputs for ONE identical input.
+Groups are rolled up per session_id to report consistency per source trace.
 We then quantify how much those outputs differ.
 
 Metrics per group (identical-input outputs):
@@ -48,6 +51,20 @@ from collections import Counter, defaultdict
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
+# The per-pair metric primitives live in compare/ (the single source of truth). This module
+# owns only the aggregation layer (modal fractions, per-trace roll-up, the LLM judge); the
+# low-level string/tool comparators are imported so every caller shares one definition.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from compare import (  # noqa: E402
+    parse_response,
+    normalized_levenshtein,
+    jaccard,
+    collapse_ws,
+    strip_ws,
+    tool_signature,
+    tool_args_signature,
+)
+
 # ----------------------------------------------------------------------------- IO
 
 
@@ -75,8 +92,8 @@ def load_run(run_dir: str) -> List[dict]:
 def request_key(record: dict) -> str:
     """Stable hash of the request payload. Identical inputs -> identical key.
 
-    The request body carries volatile fields (nothing timestamped by us here, but we
-    still normalize by parsing + canonical re-dump so key ordering can't split a group).
+    Used as a fallback grouping key when a record lacks an event_id, and to validate
+    that every response in an event_id group really was fed identical input.
     """
     req = record.get("request")
     if req is None:
@@ -91,17 +108,14 @@ def request_key(record: dict) -> str:
     return hashlib.sha1(canon.encode("utf-8")).hexdigest()
 
 
-def trace_key(record: dict) -> str:
-    """Stable per-trace identifier.
+def session_key(record: dict) -> str:
+    """Per-trace identifier: the recorded session_id.
 
-    Prefer the recorded session_id, but the trace-replay generator currently leaves
-    session_id None on the metric (it passes the lazy-stub's None instead of the
-    extracted event session id). So we fall back to a signature of the request's
-    LEADING message content, which — with disable_output_substitution — is stable and
-    distinct per source trace. Two calls of the same trace at different depths share
-    the same leading system/context message, so this groups a whole session together.
+    Each source trace maps to one session_id; every call position within that trace
+    shares it. Falls back to a request-payload-derived anchor only if session_id is
+    absent (older metrics that never populated it).
     """
-    sid = (record.get("info") or {}).get("session_id") or record.get("session_id")
+    sid = record.get("session_id") or (record.get("info") or {}).get("session_id")
     if sid:
         return str(sid)
     req = record.get("request")
@@ -116,83 +130,23 @@ def trace_key(record: dict) -> str:
     return "trace_" + hashlib.sha1(anchor.encode("utf-8")).hexdigest()[:10]
 
 
-def parse_response(record: dict) -> Dict[str, Any]:
-    """Extract the fields we compare from a per-request record.
+def event_key(record: dict) -> str:
+    """Per-call-position identifier used to group identical-input responses.
 
-    Returns dict with: ok(bool), content(str), reasoning(str), tool_calls(list),
-    finish_reason(str|None), completion_tokens(int|None), error(str|None).
+    Prefer the recorded event_id — it is unique within a run and byte-identical across
+    runs for the same (trace, call-position), so it groups exactly the repeated outputs
+    of one identical input. Falls back to (session, request-hash) if event_id is absent.
     """
-    out: Dict[str, Any] = {
-        "ok": False,
-        "content": "",
-        "reasoning": "",
-        "tool_calls": [],
-        "finish_reason": None,
-        "completion_tokens": None,
-        "error": None,
-    }
-    if record.get("error"):
-        err = record["error"]
-        out["error"] = err.get("error_type") if isinstance(err, dict) else str(err)
-        return out
-
-    resp = record.get("response")
-    if not resp:
-        out["error"] = "empty_response"
-        return out
-    try:
-        body = json.loads(resp) if isinstance(resp, str) else resp
-    except (json.JSONDecodeError, TypeError):
-        # Non-JSON body (e.g. gateway HTML error). Treat as error but keep text.
-        out["error"] = "non_json_response"
-        out["content"] = resp if isinstance(resp, str) else str(resp)
-        return out
-
-    choices = body.get("choices") or []
-    if not choices:
-        out["error"] = "no_choices"
-        return out
-    msg = choices[0].get("message", {}) or {}
-    out["content"] = (msg.get("content") or "").strip()
-    out["reasoning"] = (msg.get("reasoning_content") or "").strip()
-    out["tool_calls"] = msg.get("tool_calls") or []
-    out["finish_reason"] = choices[0].get("finish_reason")
-    usage = body.get("usage") or {}
-    out["completion_tokens"] = usage.get("completion_tokens")
-    out["ok"] = True
-    return out
+    eid = record.get("event_id") or (record.get("info") or {}).get("event_id")
+    if eid:
+        return str(eid)
+    return session_key(record) + "::" + request_key(record)[:12]
 
 
 # ---------------------------------------------------------------------- metrics
-
-
-def normalized_levenshtein(a: str, b: str) -> float:
-    """Similarity in [0,1] = 1 - edit_distance / max_len."""
-    if a == b:
-        return 1.0
-    la, lb = len(a), len(b)
-    if la == 0 or lb == 0:
-        return 0.0
-    # Space-optimized DP.
-    prev = list(range(lb + 1))
-    for i in range(1, la + 1):
-        cur = [i] + [0] * lb
-        ca = a[i - 1]
-        for j in range(1, lb + 1):
-            cost = 0 if ca == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-        prev = cur
-    dist = prev[lb]
-    return 1.0 - dist / max(la, lb)
-
-
-def jaccard(a: str, b: str) -> float:
-    sa, sb = set(a.split()), set(b.split())
-    if not sa and not sb:
-        return 1.0
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
+# parse_response, normalized_levenshtein, jaccard, collapse_ws, strip_ws, tool_signature,
+# and tool_args_signature now come from compare/ (imported above). mean_pairwise / cv /
+# agreement_fraction below are aggregation helpers unique to this run-anonymous roll-up.
 
 
 def mean_pairwise(strings: List[str], fn) -> Optional[float]:
@@ -210,38 +164,6 @@ def cv(values: List[float]) -> Optional[float]:
     if m == 0:
         return 0.0
     return statistics.pstdev(vals) / m
-
-
-def tool_signature(tool_calls: List[dict]) -> Tuple:
-    """A comparable signature of a turn's tool calls: sequence of (name, sorted arg keys)."""
-    sig = []
-    for tc in tool_calls:
-        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-        name = fn.get("name")
-        args_raw = fn.get("arguments")
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            keys = tuple(sorted(args.keys())) if isinstance(args, dict) else ("<non-dict-args>",)
-        except (json.JSONDecodeError, TypeError):
-            keys = ("<unparseable-args>",)
-        sig.append((name, keys))
-    return tuple(sig)
-
-
-def tool_args_signature(tool_calls: List[dict]) -> Tuple:
-    """Full signature including canonical arg VALUES (stricter than tool_signature)."""
-    sig = []
-    for tc in tool_calls:
-        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-        name = fn.get("name")
-        args_raw = fn.get("arguments")
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            canon = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        except (json.JSONDecodeError, TypeError):
-            canon = str(args_raw)
-        sig.append((name, canon))
-    return tuple(sig)
 
 
 def agreement_fraction(items: List[Any]) -> Optional[float]:
@@ -278,7 +200,7 @@ def analyze_group(records: List[dict]) -> Dict[str, Any]:
     # args), so a tool turn with identical empty text but different args is correctly
     # counted as non-identical rather than byte-identical.
     signatures = [
-        c + "\x00" + json.dumps(tool_args_signature(p["tool_calls"]), ensure_ascii=False)
+        collapse_ws(c) + "\x00" + json.dumps(tool_args_signature(p["tool_calls"]), ensure_ascii=False)
         for c, p in zip(contents, ok)
     ]
     distinct = Counter(signatures)
@@ -497,16 +419,25 @@ def main() -> int:
         return 1
     print(f"Found {len(run_dirs)} run dirs: {[os.path.basename(d) for d in run_dirs]}")
 
-    # Group records by (session_id, request-hash) across all runs.
-    groups: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    # Group records by event_id across all runs (one group = one identical-input call
+    # position, repeated once per run).
+    groups: Dict[str, List[dict]] = defaultdict(list)
     total_records = 0
     for rd in run_dirs:
         recs = load_run(rd)
         total_records += len(recs)
         for rec in recs:
-            sid = trace_key(rec)
-            groups[(sid, request_key(rec))].append(rec)
+            groups[event_key(rec)].append(rec)
     print(f"Loaded {total_records} records into {len(groups)} identical-input groups.")
+
+    # Sanity check: each event_id group should be fed byte-identical input on every run.
+    split = sum(1 for recs in groups.values() if len({request_key(r) for r in recs}) > 1)
+    if split:
+        print(
+            f"warning: {split} event_id group(s) contain differing request payloads — "
+            "output substitution may not be fully disabled",
+            file=sys.stderr,
+        )
 
     # Judge config. The API key is read from the RITS_API_KEY environment variable so
     # no secret lives in the repo. Only needed when --judge is passed.
@@ -522,10 +453,14 @@ def main() -> int:
 
     analyzed: List[Dict[str, Any]] = []
     per_trace_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for (sid, rkey), recs in groups.items():
+    for eid, recs in groups.items():
+        # session_id is derived from the records (identical across the group); event_id
+        # is the group key itself.
+        sid = session_key(recs[0])
         g = analyze_group(recs)
         g["session_id"] = sid
-        g["request_hash"] = rkey[:12]
+        g["event_id"] = eid
+        g["request_hash"] = request_key(recs[0])[:12]
         if args.judge and "exact" in g and not g["exact"]["all_identical"]:
             contents = [parse_response(r)["content"] for r in recs if parse_response(r)["ok"]]
             # Only judge groups with real text divergence. Pure tool-call turns have

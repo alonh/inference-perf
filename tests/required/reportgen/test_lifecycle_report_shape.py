@@ -17,7 +17,12 @@ that should be populated when a mix of multimodal requests is observed."""
 import typing
 from unittest.mock import Mock
 
-from inference_perf.apis import ErrorResponseInfo, InferenceInfo, StreamedResponseMetrics
+from inference_perf.apis import (
+    ErrorResponseInfo,
+    InferenceInfo,
+    RequestLifecycleMetric,
+    StreamedResponseMetrics,
+)
 from inference_perf.payloads import (
     RequestMetrics,
     Text,
@@ -28,7 +33,7 @@ from inference_perf.payloads import (
     Video,
     Audio,
 )
-from inference_perf.reportgen.base import summarize_requests
+from inference_perf.reportgen.base import per_request_record, summarize_requests
 
 
 def _mock_metric(
@@ -232,3 +237,50 @@ def test_lifecycle_report_shape_with_failures() -> None:
     _assert_summary(report["failures"]["request_latency"])
     _assert_summary(report["failures"]["prompt_len"])
     assert report["failures"]["by_label"]["500 - Internal Server Error"]["count"] == 1
+
+
+def _bare_info() -> InferenceInfo:
+    return InferenceInfo(request_metrics=RequestMetrics(text=Text(input_tokens=10)))
+
+
+def test_per_request_record_includes_session_and_event_id() -> None:
+    """Session-replay metrics expose both identifiers in the serialized record."""
+    metric = RequestLifecycleMetric(
+        stage_id=0,
+        session_id="trace3_session_abc",
+        event_id="trace3_session_abc:event_002_call-xyz",
+        scheduled_time=0.0,
+        start_time=0.0,
+        end_time=0.5,
+        request_data="{}",
+        response_data="hi",
+        info=_bare_info(),
+        error=None,
+    )
+
+    record = per_request_record(metric)
+
+    assert record["session_id"] == "trace3_session_abc"
+    assert record["event_id"] == "trace3_session_abc:event_002_call-xyz"
+    # Existing fields are preserved.
+    assert record["start_time"] == 0.0
+    assert record["response"] == "hi"
+    assert record["error"] is None
+
+
+def test_per_request_record_defaults_identifiers_to_none() -> None:
+    """Non-session workloads leave both identifiers unset, so they serialize as None."""
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0,
+        start_time=0.0,
+        end_time=0.5,
+        request_data="{}",
+        info=_bare_info(),
+        error=None,
+    )
+
+    record = per_request_record(metric)
+
+    assert record["session_id"] is None
+    assert record["event_id"] is None
+    assert "start_time" in record

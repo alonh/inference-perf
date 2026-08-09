@@ -18,11 +18,13 @@ Runs the data export, then injects the JSON into viewer_template.html to produce
 single double-clickable HTML file. This is the last step of the experiment pipeline.
 
 Usage:
-  build_viewer.py <reports_base_dir> [--analysis analysis.json] [--out consistency_viewer.html]
+  build_viewer.py <reports_base_dir> [--analysis analysis.json]
+      [--papers analysis_papers.json] [--out consistency_viewer.html]
 
 Example:
   build_viewer.py reports-consistency \
       --analysis reports-consistency/analysis.json \
+      --papers reports-consistency/analysis_papers.json \
       --out reports-consistency/consistency_viewer.html
 """
 from __future__ import annotations
@@ -41,6 +43,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("base_dir", help="Directory containing run_* subdirectories")
     ap.add_argument("--analysis", default=None, help="analysis.json (for semantic clusters)")
+    ap.add_argument("--papers", default=None,
+                    help="analysis_papers.json from consistency_statistics.py; "
+                         "populates the 'Paper metrics' tab. Omit to leave that tab empty.")
     ap.add_argument("--out", default=None, help="Output HTML path")
     ap.add_argument("--data", default=None, help="Intermediate viewer_data.json path")
     args = ap.parse_args()
@@ -63,13 +68,27 @@ def main() -> int:
         tpl = f.read()
     with open(data_path) as f:
         data = f.read()
-    # Escape any "</" so the embedded JSON can't terminate the <script> tag early.
+
+    # The 'Paper metrics' tab is fed a pre-generated analysis_papers.json (from
+    # consistency_statistics.py). If not supplied — or the file is missing — we inject
+    # the literal `null` so the tab shows an empty state instead of breaking the viewer.
+    papers = "null"
+    if args.papers and os.path.exists(args.papers):
+        with open(args.papers) as f:
+            papers = f.read()
+    elif args.papers:
+        print(f"warning: --papers {args.papers} not found; Paper-metrics tab will be empty",
+              file=sys.stderr)
+
+    # Escape any "</" so embedded JSON can't terminate the <script> tag early.
     # JSON.parse (and Python json) both read "\/" as "/", so this is lossless.
     data = data.replace("</", "<\\/")
-    if "__DATA__" not in tpl:
-        print("template missing __DATA__ placeholder", file=sys.stderr)
-        return 1
-    html = tpl.replace("__DATA__", data)
+    papers = papers.replace("</", "<\\/")
+    for ph in ("__DATA__", "__PAPERS__"):
+        if ph not in tpl:
+            print(f"template missing {ph} placeholder", file=sys.stderr)
+            return 1
+    html = tpl.replace("__DATA__", data).replace("__PAPERS__", papers)
     with open(out_path, "w") as f:
         f.write(html)
     print(f"✓ wrote {out_path} ({os.path.getsize(out_path)/1024:.0f} KB)")

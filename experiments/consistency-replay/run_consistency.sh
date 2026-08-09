@@ -26,13 +26,19 @@
 
 set -u
 
+# macOS fork-safety: this repo forces multiprocessing 'fork', and mp.Manager() makes the
+# parent multi-threaded before workers fork. Without this, forked children abort the moment
+# they touch Network.framework (getaddrinfo) on this machine's IPv6-first resolver. This env
+# var tells the ObjC runtime not to abort in that case. Harmless on Linux/other machines.
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 CONFIG="experiments/consistency-replay/config.yml"
 N_RUNS="${1:-10}"
-PYTHON=".venv/bin/python"
+PYTHON="$REPO_ROOT/.venv/bin/python"
 OUT_BASE="reports-consistency"
 LOG_DIR="$OUT_BASE/logs"
 

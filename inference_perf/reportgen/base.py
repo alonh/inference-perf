@@ -537,6 +537,25 @@ def summarize_prometheus_metrics(metrics: ModelServerMetrics) -> ResponsesSummar
     )
 
 
+def per_request_record(metric: RequestLifecycleMetric) -> dict[str, Any]:
+    """Serialize one metric into a per_request_lifecycle_metrics record.
+
+    session_id/event_id are emitted for session-replay workloads and are None
+    otherwise (mirroring how info/error collapse to None when absent), so the
+    record shape is stable across workload types.
+    """
+    return {
+        "session_id": metric.session_id if metric.session_id else None,
+        "event_id": metric.event_id if metric.event_id else None,
+        "start_time": metric.start_time,
+        "end_time": metric.end_time,
+        "request": metric.request_data,
+        "response": metric.response_data,
+        "info": metric.info.model_dump() if metric.info else None,
+        "error": metric.error.model_dump() if metric.error else None,
+    }
+
+
 def summarize_requests(
     metrics: List[RequestLifecycleMetric],
     percentiles: List[float],
@@ -908,17 +927,7 @@ class ReportGenerator:
         if report_config.request_lifecycle.per_request:
             report_file = ReportFile(
                 name="per_request_lifecycle_metrics",
-                contents=[
-                    {
-                        "start_time": metric.start_time,
-                        "end_time": metric.end_time,
-                        "request": metric.request_data,
-                        "response": metric.response_data,
-                        "info": metric.info.model_dump() if metric.info else None,
-                        "error": metric.error.model_dump() if metric.error else None,
-                    }
-                    for metric in request_metrics
-                ],
+                contents=[per_request_record(metric) for metric in request_metrics],
             )
             lifecycle_reports.append(report_file)
 

@@ -33,6 +33,7 @@ not compounding cascade drift. Without the flag you'd measure input divergence i
 | `experiments/consistency-replay/config.yml` | The experiment config (placeholder API key) |
 | `experiments/consistency-replay/run_consistency.sh` | Runs the config N times, one report dir per run; injects `$RITS_API_KEY` |
 | `experiments/consistency-replay/analyze_consistency.py` | Groups by (trace, identical-input) and computes metrics |
+| `experiments/consistency-replay/consistency_statistics.py` | Paper-grounded metrics: Yagubyan TSS/AC + Hypothesis 1; Raj U-statistic θ+CI; run×run matrices; cross-condition MMD |
 | `experiments/consistency-replay/export_viewer_data.py` | Exports per-group data (texts + pairwise matrices) for the viewer |
 | `experiments/consistency-replay/viewer_template.html` | The viewer UI (data injected at build time) |
 | `experiments/consistency-replay/build_viewer.py` | Export + inject → single self-contained HTML |
@@ -43,6 +44,12 @@ Results land in `reports-consistency/` (run dirs, `analysis.json`, `consistency_
 ## Procedure
 
 Create a todo per step and work them in order.
+
+> **Analysis-only (reuse existing runs).** If `reports-consistency/run_*` already exist
+> and you only want (re)analysis — not fresh repetitions — **skip Steps 0–1** and go
+> straight to Step 2 / Step 2c / Step 3. The analysis and build steps run **fully offline
+> against the existing run dirs**: no endpoint, no `RITS_API_KEY` — *unless* you pass
+> `--judge` (Step 2) or `--kernel judge` (Step 2c), which are the only network calls.
 
 ### Step 0 — Probe the endpoint (don't skip)
 
@@ -91,11 +98,50 @@ Long-running; run in the background and monitor `reports-consistency/runner.log`
 Drop `--judge` to skip the semantic pass (no network, faster). Prints a summary +
 per-trace table; writes full per-group detail to `analysis.json`.
 
+### Step 2c — Paper-grounded analysis (optional, offline)
+
+A second analyzer implementing two papers on agent consistency. It reuses the same
+`run_*` dirs and writes a **separate** file (`analysis_papers.json`) that Step 3 folds
+into the viewer as a distinct **"Paper metrics"** tab — the existing `analysis.json`
+view is untouched.
+
+```bash
+.venv/bin/python experiments/consistency-replay/consistency_statistics.py \
+    --condition base=reports-consistency \
+    --out reports-consistency/analysis_papers.json
+```
+
+Stdlib only, runs offline (~45s for 10 runs). Computes, per condition:
+- **Yagubyan (arXiv:2605.28840)** — TSS (tool-name-sequence similarity), AC (argument
+  consistency), and the **Hypothesis 1** check `E[TSS] ≫ E[AC]`.
+- **Raj et al. (arXiv:2605.10516)** — U-statistic consistency **θ with a 95% CI**
+  (`--kernel exact|levenshtein|judge`, default `exact`); `--kernel judge` is the only
+  option that calls the network. Plus a **trajectory** U-statistic θ+CI (the same Eq. 1/3
+  all-pairs construction, applied to tool-call sequences instead of text): **JS**
+  (composition — *which* tools) and **GAK** (ordering — *what order*). Computed within one
+  condition — no second run set, since under Assumption 1 the repetitions of a single
+  setup are themselves a valid sample.
+- A **run × run** matrix for every metric (each repetition compared against each other),
+  plus an outlier (most-divergent) run.
+
+**Cross-condition MMD** needs **≥2 conditions** — pass `--condition` more than once and
+add permutation testing:
+```bash
+.venv/bin/python experiments/consistency-replay/consistency_statistics.py \
+    --condition base=reports-consistency \
+    --condition variant=reports-consistency-variant \
+    --perm 200 --out reports-consistency/analysis_papers.json
+```
+This adds a two-sample MMD² + permutation p-value over trajectory distributions (JS and
+GAK kernels) between each condition pair. With a single condition the MMD section is
+simply omitted.
+
 ### Step 3 — Build the interactive viewer
 
 ```bash
 .venv/bin/python experiments/consistency-replay/build_viewer.py reports-consistency \
     --analysis reports-consistency/analysis.json \
+    --papers reports-consistency/analysis_papers.json \
     --out reports-consistency/consistency_viewer.html
 open reports-consistency/consistency_viewer.html
 ```
@@ -103,6 +149,29 @@ open reports-consistency/consistency_viewer.html
 Self-contained HTML (double-click to open, no server). **Takes a few minutes** — the
 pairwise Levenshtein matrix is O(len²) in pure Python; the exporter caps compared
 strings at 2000 chars to bound it.
+
+The viewer is a **single merged view** (no tabs). Picking a trace in the sidebar shows a
+**conversation timeline**: the **original task** (`messages[0]`) is pinned at the top, then
+each model call in the agent loop is listed **in send order** (steps ordered by message
+count — request → response, request → response …), one compact row per step with its
+consistency pills. Steps where all runs agree carry a green **"✓ all N agree"** marker but
+stay visible. Clicking a step **expands** it into the detailed comparison: the **request
+that every run saw is pinned at the top** (sticky header: system head, tools available, the
+message the model responded to), the N response cards render below, and clicking any two
+cards (A, B) shows a word-level diff. A **checkbox row** above the cards lets you pick which
+metrics appear on the A↔B comparison — content similarity, output Jaccard, exact match,
+**TSS, AC, JS-kernel, GAK** — each computed **for that specific run pair at that specific
+call position** (exported per group by `export_viewer_data.py`, no extra flag needed). The
+back-link returns to the timeline. The **"All traces" overview** (sidebar top) keeps the
+cross-trace dashboard + inconsistency-ranked list.
+
+`--papers` is optional and feeds the **aggregate "Paper-grounded summary"** — the
+U-statistic θ + trajectory θ cards, Hypothesis 1, the run×run heatmap, and cross-condition
+MMD — which now lives in a collapsible section on the **"All traces" overview** (built from
+the pre-generated `analysis_papers.json`; `build_viewer.py` does **not** run that analyzer
+itself). Omit the flag (or if the file is absent) and the viewer still builds — the summary
+section is simply absent, and the per-pair checkbox metrics still work (they come from the
+export step, not `--papers`).
 
 ### Step 4 — Write findings
 
@@ -114,8 +183,8 @@ existing `FINDINGS.md` as the template if present.
 
 | Metric | Meaning | Good = |
 |---|---|---|
-| **Byte-identical %** | fraction of call positions where all runs returned the exact same output | high = deterministic |
-| **Distinct outputs / call** | number of unique outputs out of N runs | low |
+| **Byte-identical %** | fraction of call positions where all runs returned the same output, **ignoring whitespace formatting** (tool args are whitespace-stripped; content collapses whitespace runs but keeps word boundaries) | high = deterministic |
+| **Distinct outputs / call** | number of unique outputs out of N runs (same whitespace-insensitive signature; the viewer still displays the original text) | low |
 | **Levenshtein similarity** | mean pairwise char similarity (1=identical) | high; a usable cheap proxy for semantic drift |
 | **Jaccard** | pairwise word-set overlap | high |
 | **finish_reason agreement** | do runs stop the same way | high |
@@ -127,6 +196,29 @@ Levenshtein usually (not always) means same meaning; low Levenshtein means the m
 likely made a genuinely different decision. Closed lookups tend to stay semantically
 consistent even when wording drifts; open-ended agentic reasoning forks into multiple
 real trajectories.
+
+### Paper-grounded metrics (Step 2c → "Paper-grounded summary" in the overview; per-pair values also selectable on any A↔B comparison via the checkbox row)
+
+| Metric | Meaning | Read as |
+|---|---|---|
+| **TSS** (Yagubyan) | mean pairwise similarity of the **tool-name sequences** | high = runs call the same tools in the same order |
+| **AC** (Yagubyan) | mean pairwise **argument** agreement (step-aligned key/value overlap; 0 when tools differ) | high = same arguments, not just same tools |
+| **Hypothesis 1** | does `E[TSS] ≫ E[AC]`? | **supported** = *structure is stable, arguments vary* — the arguments are where nondeterminism shows up |
+| **θ + 95% CI** (Raj) | U-statistic: mean pairwise output agreement under the chosen kernel, with a confidence interval | higher θ = more consistent; the CI is the uncertainty from having only M instances |
+| **θ_traj (JS)** (Raj, Eq. 1/3) | same U-statistic, but over tool-call **composition** (which tools each run used) | high = runs invoke the same *set* of tools |
+| **θ_traj (GAK)** (Raj, Eq. 1/3) | same U-statistic, but over tool-call **ordering** (the sequence) | high = runs invoke tools in the same *order* |
+| **run × run matrix** | every repetition scored against every other | spot a single divergent run (flagged as the outlier) vs. uniform drift |
+| **MMD²** (Raj, ≥2 conditions) | two-sample distance between two conditions' **trajectory distributions**, with a permutation p-value | MMD²≈0 with high p ⇒ the conditions are **statistically indistinguishable** |
+
+Typical headline for this endpoint: **TSS ≈ 1.0 but AC ≈ 0.46** — the agent almost always
+picks the same tools in the same order, yet the *arguments* it passes vary run to run.
+That is the Hypothesis-1 pattern (arXiv:2605.28840), and it lines up with the
+text-drift-vs-meaning-drift split above: structure is deterministic, free-form content is
+not. θ (arXiv:2605.10516) gives that a single number with error bars. The two **θ_traj**
+values are the trajectory analogue and typically sit near **1.0** here (js≈0.999,
+gak≈0.998) — the tool-call structure is essentially deterministic; they equal the
+corresponding run-pair means but add a confidence interval (Eq. 1/3, computed within one
+condition — no perturbation set needed, per Assumption 1's `x_mi = x_m0`).
 
 ## Adapting the experiment
 

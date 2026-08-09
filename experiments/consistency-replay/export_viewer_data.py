@@ -43,11 +43,25 @@ from analyze_consistency import (  # noqa: E402
     load_run,
     parse_response,
     request_key,
-    trace_key,
+    session_key,
+    event_key,
     normalized_levenshtein,
     jaccard,
     tool_args_signature,
+    collapse_ws,
+    strip_ws,
     cv,
+)
+
+# Paper-metric kernels (Yagubyan TSS/AC, Raj JS/GAK). Computed per run-pair per group so the
+# viewer can show them on a specific A-vs-B comparison at a specific call position — the
+# analyzer only stores run-level averages, which is the wrong granularity for the diff panel.
+from consistency_statistics import (  # noqa: E402
+    Feature,
+    tss,
+    argument_consistency,
+    js_kernel,
+    global_alignment_kernel,
 )
 
 
@@ -73,6 +87,7 @@ def input_preview(record: dict) -> Dict[str, Any]:
         if m.get("role") == "system":
             system_head = text_of(m)[:600]
             break
+    first = msgs[0] if msgs else {}
     last = msgs[-1] if msgs else {}
     tools = obj.get("tools") or []
     tool_names = [
@@ -81,6 +96,10 @@ def input_preview(record: dict) -> Dict[str, Any]:
     return {
         "n_messages": len(msgs),
         "system_head": system_head,
+        # messages[0] = the original task. The viewer's conversation timeline shows this
+        # once at the top of a trace; later steps' last_message is a tool result, not the task.
+        "first_role": first.get("role"),
+        "first_message": text_of(first)[:1600],
         "last_role": last.get("role"),
         "last_message": text_of(last)[:1200],
         "tools": [t for t in tool_names if t],
@@ -105,6 +124,58 @@ def version_from_record(rec: dict, run_name: str) -> Dict[str, Any]:
     }
 
 
+def detect_model_endpoint(run_dirs: List[str]) -> tuple:
+    """Read the model + endpoint actually used, from the run data — not hardcoded.
+
+    Source of truth is the request body ("model" field = what was actually sent). Falls
+    back to the run's config.yaml (server.model_name / base_url) if a request lacks it.
+    The endpoint label is derived from the base URL host so the viewer reflects whichever
+    model/server this particular run used (run_experiment.sh can select the model).
+    """
+    model_name = None
+    base_url = None
+
+    # 1) model from an actual request body (authoritative — this is what was sent).
+    for rd in run_dirs:
+        for rec in load_run(rd):
+            req = rec.get("request")
+            try:
+                obj = json.loads(req) if isinstance(req, str) else req
+                m = (obj or {}).get("model")
+            except (json.JSONDecodeError, TypeError):
+                m = None
+            if m:
+                model_name = m
+                break
+        if model_name:
+            break
+
+    # 2) fall back to (and read base_url from) the per-run config.yaml.
+    for rd in run_dirs:
+        cfg_path = os.path.join(rd, "config.yaml")
+        if not os.path.exists(cfg_path):
+            continue
+        for line in open(cfg_path):
+            s = line.strip()
+            if model_name is None and s.startswith("model_name:"):
+                model_name = s.split(":", 1)[1].strip().strip("'\"")
+            elif base_url is None and s.startswith("base_url:"):
+                base_url = s.split(":", 1)[1].strip().strip("'\"")
+        if base_url is not None and model_name is not None:
+            break
+
+    # 3) endpoint label from the host (best-effort, purely cosmetic).
+    endpoint = "unknown"
+    if base_url:
+        host = base_url.split("://", 1)[-1].split("/", 1)[0]
+        if "rits" in host or "fmaas" in host:
+            endpoint = "RITS"
+        else:
+            endpoint = host
+
+    return model_name or "unknown", endpoint, base_url
+
+
 def build() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("base_dir")
@@ -117,27 +188,36 @@ def build() -> int:
         print(f"No run_* dirs under {args.base_dir}", file=sys.stderr)
         return 1
 
-    # Map (trace, request_hash) -> semantic info from analysis.json (optional).
-    semantic: Dict[tuple, dict] = {}
+    model_name, endpoint, base_url = detect_model_endpoint(run_dirs)
+
+    # Map event_id -> semantic info from analysis.json (optional). The analyzer keys its
+    # groups on event_id, so we do too.
+    semantic: Dict[str, dict] = {}
     if args.analysis and os.path.exists(args.analysis):
         adata = json.load(open(args.analysis))
         for g in adata.get("groups", []):
-            if g.get("semantic"):
-                semantic[(g.get("session_id"), g.get("request_hash"))] = g["semantic"]
+            if g.get("semantic") and g.get("event_id"):
+                semantic[g["event_id"]] = g["semantic"]
 
-    # Group records by (trace, request_hash) across runs.
-    groups: Dict[tuple, List[tuple]] = defaultdict(list)  # -> list of (run_name, record)
+    # Group records by event_id across runs (one group = one identical-input call
+    # position). session_id is derived per group for the per-trace roll-up.
+    groups: Dict[str, List[tuple]] = defaultdict(list)  # event_id -> list of (run_name, record)
     for rd in run_dirs:
         run_name = os.path.basename(rd)
         for rec in load_run(rd):
-            groups[(trace_key(rec), request_key(rec))].append((run_name, rec))
+            groups[event_key(rec)].append((run_name, rec))
 
     out_groups: List[Dict[str, Any]] = []
-    for (tkey, rkey), items in groups.items():
+    for ekey, items in groups.items():
+        tkey = session_key(items[0][1])  # session_id (identical across the group)
+        rkey = request_key(items[0][1])  # request-payload hash (for display/validation)
         versions = [version_from_record(rec, run) for run, rec in items]
         ok_versions = [v for v in versions if v["ok"]]
 
         # Comparable signature per ok version = content + canonical tool args.
+        # Whitespace-collapsed so pure formatting differences (e.g. `{"content":` vs
+        # `{ "content":`, or pretty-printed vs single-line JSON) don't count as distinct —
+        # this drives the "N distinct" count, cluster coloring, and exact-match pill.
         def sig(v):
             toolsig = json.dumps(
                 tool_args_signature(
@@ -145,14 +225,19 @@ def build() -> int:
                 ),
                 ensure_ascii=False,
             )
-            return v["content"] + "\x00" + toolsig
+            return collapse_ws(v["content"]) + "\x00" + toolsig
 
         # Display string for lexical comparison (content, or tool call if no content).
+        # Whitespace-normalized so the graded metrics (Content similarity, Output Jaccard)
+        # ignore pure formatting — matching the exact-match rule: tool ARGS are whitespace-
+        # stripped (pretty-printed vs compact JSON compare equal), content collapses
+        # whitespace runs (word boundaries kept). The viewer still DISPLAYS the raw text and
+        # diffs it raw; only the similarity numbers use this normalized form.
         def disp(v):
             if v["content"].strip():
-                return v["content"]
+                return collapse_ws(v["content"])
             if v["tool_calls"]:
-                return "\n".join(f'{t["name"]}({t["arguments"]})' for t in v["tool_calls"])
+                return "\n".join(f'{t["name"]}({strip_ws(t["arguments"] or "")})' for t in v["tool_calls"])
             return ""
 
         n = len(ok_versions)
@@ -174,6 +259,60 @@ def build() -> int:
                     jc = round(jaccard(disps[i], disps[j]), 4)
                     lev_matrix[i][j] = lev_matrix[j][i] = lv
                     jac_matrix[i][j] = jac_matrix[j][i] = jc
+
+        # Per-run-pair paper metrics, aligned to ok_versions (same indexing as lev_matrix).
+        # These let the viewer show TSS/AC/JS/GAK etc. for a specific A-vs-B pair at THIS
+        # call position; the analyzer only keeps run-level averages. Each Feature parses one
+        # record's tool names/args/histogram once.
+        #
+        # IMPORTANT: output_levenshtein / output_jaccard compare the DISPLAY string
+        # `disps[i]` (= content, or `name(args)` for tool turns) — the exact text the diff
+        # panel renders — NOT Feature.content. On a tool turn Feature.content is empty, so
+        # comparing content alone reports 1.0 for every pair even when the tool ARGUMENTS
+        # differ visibly; that made every pill read 100%. Using the display string makes the
+        # pill match what the user sees diffed, and matches lev_matrix exactly.
+        PAIR_METRICS = [
+            "output_exact_match",
+            "output_levenshtein",
+            "output_jaccard",
+            "tss",
+            "ac",
+            "js_kernel",
+            "gak",
+        ]
+        feats = [Feature(rec) for run, rec in items if parse_response(rec)["ok"]]
+        pair_metrics: Dict[str, List[List[Any]]] = {
+            mk: [[None] * n for _ in range(n)] for mk in PAIR_METRICS
+        }
+        for mk in PAIR_METRICS:
+            for i in range(n):
+                # Diagonal: a version vs itself. AC is undefined for non-tool turns even on
+                # the diagonal, so mirror argument_consistency's None there too.
+                if mk == "ac":
+                    pair_metrics[mk][i][i] = argument_consistency(feats[i].kv, feats[i].kv)
+                else:
+                    pair_metrics[mk][i][i] = 1.0
+        for i in range(n):
+            for j in range(i + 1, n):
+                fa, fb = feats[i], feats[j]
+                vals = {
+                    # Exact match = full content+tool-args signature (matches cluster ids).
+                    "output_exact_match": 1.0 if fa.signature == fb.signature else 0.0,
+                    # Text similarity over the DISPLAYED string (so tool-arg drift shows up):
+                    # reuse the already-computed lev_matrix/jac_matrix (same disps, same
+                    # normalized-Levenshtein / jaccard) rather than paying the O(len^2) DP twice.
+                    "output_levenshtein": lev_matrix[i][j],
+                    "output_jaccard": jac_matrix[i][j],
+                    # Tool-structure kernels (names / ordering / composition) — legitimately
+                    # 1.0 when the same tool is called the same way; argument drift is AC's job.
+                    "tss": round(tss(fa.names, fb.names), 4),
+                    "js_kernel": round(js_kernel(fa.hist, fb.hist), 4),
+                    "gak": round(global_alignment_kernel(fa.names, fb.names), 4),
+                }
+                ac = argument_consistency(fa.kv, fb.kv)
+                vals["ac"] = round(ac, 4) if ac is not None else None
+                for mk in PAIR_METRICS:
+                    pair_metrics[mk][i][j] = pair_metrics[mk][j][i] = vals[mk]
 
         sigs = [sig(v) for v in ok_versions]
         distinct = len(set(sigs)) if sigs else 0
@@ -201,6 +340,7 @@ def build() -> int:
         out_groups.append(
             {
                 "trace": tkey,
+                "event_id": ekey,
                 "request_hash": rkey[:12],
                 "input": input_preview(items[0][1]),
                 "versions": versions,          # all, including errors (greyed in UI)
@@ -208,6 +348,7 @@ def build() -> int:
                 "cluster_ids": cluster_ids,     # aligned to ok versions
                 "lev_matrix": lev_matrix,
                 "jac_matrix": jac_matrix,
+                "pair_metrics": pair_metrics,  # per run-pair paper kernels, aligned to ok versions
                 "metrics": {
                     "n_runs": len(versions),
                     "n_ok": n,
@@ -220,7 +361,7 @@ def build() -> int:
                     "length_max": max(toks) if toks else None,
                     "is_tool_turn": is_tool,
                 },
-                "semantic": semantic.get((tkey, rkey[:12])),
+                "semantic": semantic.get(ekey),
             }
         )
 
@@ -254,8 +395,9 @@ def build() -> int:
 
     payload = {
         "meta": {
-            "model": "Qwen/Qwen3-VL-235B-A22B-Instruct",
-            "endpoint": "RITS",
+            "model": model_name,
+            "endpoint": endpoint,
+            "base_url": base_url,
             "n_runs": len(run_dirs),
             "runs": [os.path.basename(d) for d in run_dirs],
             "substitution_disabled": True,

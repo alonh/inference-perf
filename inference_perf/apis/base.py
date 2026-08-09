@@ -64,6 +64,11 @@ class ErrorResponseInfo(BaseModel):
 class RequestLifecycleMetric(BaseModel):
     stage_id: Optional[int] = None
     session_id: Optional[str] = None
+    # Intra-session ordering identifier for session-replay workloads. Format is
+    # "<session_id>:event_<NNN>_<call_id>" where the zero-padded NNN gives the
+    # deterministic, timing-independent position of this call within its session.
+    # None for non-session workloads whose request data carries no event_id.
+    event_id: Optional[str] = None
     scheduled_time: float
     start_time: float
     end_time: float

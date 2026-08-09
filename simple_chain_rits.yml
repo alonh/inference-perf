@@ -1,0 +1,46 @@
+# Config for simple_chain.json - Basic sequential chain test case against RITS
+api:
+  type: chat
+  streaming: false
+  headers:
+    # RITS authenticates via this header, not Authorization: Bearer.
+    RITS_API_KEY: "SET_VIA_ENV"
+
+data:
+  type: otel_trace_replay
+  otel_trace_replay:
+    trace_files:
+      - "examples/otel/test_traces/simple/simple_chain.json"
+
+    use_static_model: false
+
+    default_max_tokens: 100
+
+    include_errors: false
+    skip_invalid_files: true
+
+load:
+  type: trace_session_replay
+  stages:
+    - concurrent_sessions: 1  # Sequential execution
+  worker_max_concurrency: 20
+
+server:
+  type: vllm
+  # RITS routes by the model slug in the URL path; the gateway root alone 403s.
+  base_url: "https://inference-3scale-apicast-production.apps.rits.fmaas.res.ibm.com/qwen3-30b-a3b-thinking-2507"
+  model_name: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+  cert_path: ""
+
+tokenizer:
+  pretrained_model_name_or_path: "Qwen/Qwen2-7B"
+
+storage:
+  local_storage:
+    path: "reports-simple-chain-rits"
+
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: false
+    per_request: false

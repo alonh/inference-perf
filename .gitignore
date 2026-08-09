@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -186,3 +189,6 @@ reports-*/
 
 # Optional live-test per-case reports
 tests/optional/**/output/
+
+# HAL trace data (large; fetch via hal_traces/fetch_hal_traces.py)
+hal_traces/
