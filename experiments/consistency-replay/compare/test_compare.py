@@ -6,7 +6,9 @@ from compare import (
     compare_responses,
     compare_profiles,
     extract_profile,
+    load_records,
     parse_response,
+    parse_records,
     normalized_levenshtein,
     fast_content_ratio,
     jaccard,
@@ -22,6 +24,7 @@ from compare import (
     global_alignment_kernel,
     action_histogram,
 )
+from compare.parsing import _call_fields
 
 
 def _call(name, **args):
@@ -91,6 +94,99 @@ class TestParseResponse:
         parsed = parse_response(record)
         assert parsed["ok"] is False
         assert parsed["error"] == "empty_response"
+
+
+class TestParsingContract:
+    """compare.parsing owns parsing; the comparators refuse to do it for you."""
+
+    RAW = {
+        "response": json.dumps({
+            "choices": [{"message": {"content": "hi", "tool_calls": []},
+                         "finish_reason": "stop"}]
+        })
+    }
+
+    def test_compare_responses_rejects_raw_record(self):
+        parsed = parse_response(self.RAW)
+        with pytest.raises(ValueError, match="not a parsed response"):
+            compare_responses(self.RAW, parsed)
+        with pytest.raises(ValueError, match="not a parsed response"):
+            compare_responses(parsed, self.RAW)
+        # Parsed on both sides works.
+        assert compare_responses(parsed, parsed)["content_levenshtein"] == 1.0
+
+    def test_response_signature_rejects_raw_record(self):
+        with pytest.raises(ValueError, match="not a parsed response"):
+            response_signature(self.RAW)
+        assert response_signature(parse_response(self.RAW)) is not None
+
+    def test_error_message_names_the_offending_side(self):
+        parsed = parse_response(self.RAW)
+        with pytest.raises(ValueError, match="response_b"):
+            compare_responses(parsed, self.RAW)
+
+    def test_parse_records_is_elementwise(self):
+        records = [self.RAW, {"error": {"error_type": "timeout"}}]
+        parsed = parse_records(records)
+        assert [p["ok"] for p in parsed] == [True, False]
+        assert parsed == [parse_response(r) for r in records]
+
+    def test_parse_records_empty(self):
+        assert parse_records([]) == []
+
+
+class TestCallFields:
+    """Both tool-call wire shapes are readable; junk degrades to (None, None)."""
+
+    def test_nested_function_shape(self):
+        assert _call_fields({"function": {"name": "grep", "arguments": "{}"}}) == ("grep", "{}")
+
+    def test_flat_shape(self):
+        # export_viewer_data's flattened summaries carry name/arguments at top level.
+        assert _call_fields({"name": "grep", "arguments": "{}"}) == ("grep", "{}")
+
+    def test_function_block_wins_over_top_level(self):
+        tc = {"function": {"name": "inner", "arguments": "{}"}, "name": "outer"}
+        assert _call_fields(tc) == ("inner", "{}")
+
+    def test_junk(self):
+        assert _call_fields(None) == (None, None)
+        assert _call_fields("grep") == (None, None)
+        assert _call_fields({}) == (None, None)
+        assert _call_fields({"function": "not-a-dict"}) == (None, None)
+        assert _call_fields({"id": "call_1"}) == (None, None)  # no name/arguments => not flat
+
+    def test_flat_shape_reaches_the_signature(self):
+        flat = {"ok": True, "content": "x", "tool_calls": [{"name": "g", "arguments": '{"p": 1}'}]}
+        nested = {"ok": True, "content": "x",
+                  "tool_calls": [{"function": {"name": "g", "arguments": '{"p": 1}'}}]}
+        assert response_signature(flat) == response_signature(nested)
+        assert extract_tool_names(flat["tool_calls"]) == ("g",)
+
+
+class TestLoadRecords:
+    """The three on-disk shapes load_records accepts, plus the one it rejects."""
+
+    REC = {"event_id": "e1", "response": None}
+
+    def _write(self, tmp_path, obj):
+        p = tmp_path / "metrics.json"
+        p.write_text(json.dumps(obj))
+        return str(p)
+
+    def test_bare_list(self, tmp_path):
+        assert load_records(self._write(tmp_path, [self.REC])) == [self.REC]
+
+    def test_contents_key(self, tmp_path):
+        assert load_records(self._write(tmp_path, {"contents": [self.REC]})) == [self.REC]
+
+    def test_records_key(self, tmp_path):
+        assert load_records(self._write(tmp_path, {"records": [self.REC]})) == [self.REC]
+
+    def test_unknown_dict_raises(self, tmp_path):
+        path = self._write(tmp_path, {"something_else": [self.REC]})
+        with pytest.raises(ValueError, match="Unexpected data format"):
+            load_records(path)
 
 
 class TestToolMetrics:

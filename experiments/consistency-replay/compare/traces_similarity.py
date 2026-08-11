@@ -3,74 +3,21 @@
 Each profile represents one execution of a complete trace (one run of one model).
 Functions in this module take two profiles and return similarity scores.
 All metrics are normalized to [0, 1].
+
+Like response_similarity.py, this module only COMPARES. Profiles are built by
+parsing.extract_profile — which is where records are read and parsed — so nothing here
+touches a raw record.
 """
 
-import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List
 
+from .parsing import response_signature
 from .response_similarity import (
-    compare_responses,
-    extract_tool_names,
-    parse_response,
-    compare_tool_set_overlap,
-    collapse_ws,
-    response_signature,
-    tool_args_signature,
     collapse_adjacent,
+    compare_responses,
+    compare_tool_set_overlap,
     tool_sequence_lcs,
 )
-
-
-def extract_profile(records: List[dict]) -> dict:
-    """Extract a trace profile from a list of request-response records.
-
-    Args:
-        records: List of dicts from per_request_lifecycle_metrics.json
-
-    Returns:
-        dict with keys:
-          - tool_sequence: Tuple[str, ...] — ordered tool NAMES across all requests
-          - tool_call_sequence: Tuple[Tuple[str, str], ...] — ordered (name, canonical-args)
-            tokens across all requests; the arg-aware counterpart of tool_sequence, used by
-            the ordered-dedup trace metric (two calls match only if name AND args agree)
-          - unique_tools: set — set of tool names used
-          - num_requests: int — how many request-response pairs
-          - num_tool_calls: int — total tool invocations
-          - num_errors: int — how many requests errored
-          - responses: List[dict] — parsed responses (ok, content, tool_calls, etc.)
-          - records: List[dict] — original records
-    """
-    all_tool_names: List[str] = []
-    all_tool_calls: List[Tuple[str, str]] = []
-    responses = []
-    num_errors = 0
-
-    for rec in records:
-        parsed = parse_response(rec)
-        responses.append(parsed)
-
-        if not parsed["ok"]:
-            num_errors += 1
-            continue
-
-        # Extract tool names in order (same logic as response_similarity.extract_tool_names)
-        all_tool_names.extend(extract_tool_names(parsed["tool_calls"]))
-        # Arg-aware tokens in order: (name, canonical-args) per call, spanning the whole trace.
-        all_tool_calls.extend(tool_args_signature(parsed["tool_calls"]))
-
-    tool_sequence = tuple(all_tool_names)
-    unique_tools = set(all_tool_names)
-
-    return {
-        "tool_sequence": tool_sequence,
-        "tool_call_sequence": tuple(all_tool_calls),
-        "unique_tools": unique_tools,
-        "num_requests": len(records),
-        "num_tool_calls": len(all_tool_names),
-        "num_errors": num_errors,
-        "responses": responses,
-        "records": records,
-    }
 
 
 def compare_session_depths(depth_a: int, depth_b: int) -> float:
@@ -90,7 +37,7 @@ def compare_session_depths(depth_a: int, depth_b: int) -> float:
 def compare_response_lists(
     responses_a: List[dict], responses_b: List[dict], align_by_position: bool = True
 ) -> float:
-    """Compare two lists of responses.
+    """Compare two lists of PARSED responses (profile["responses"]).
 
     If align_by_position=True (default), aligns by index and compares only min(len).
     If False, returns 0 if lists have different lengths.
@@ -118,7 +65,7 @@ def compare_response_lists(
 def compare_profiles(profile_a: dict, profile_b: dict) -> Dict[str, float]:
     """Compare two trace profiles, returning all metrics.
 
-    Input: two dicts from extract_profile() with keys:
+    Input: two dicts from parsing.extract_profile() with keys:
            tool_sequence, tool_call_sequence, unique_tools, num_requests, num_errors,
            responses, records
 

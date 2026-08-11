@@ -54,20 +54,24 @@ from typing import Any, Dict, List, Optional, Tuple
 # Per-pair metric primitives come from compare/ (single source of truth).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare import (  # noqa: E402
+    # Parsing.
+    find_run_dirs,
+    load_run,
     parse_response,
     collapse_ws,
+    extract_tool_names,
+    tool_kv_set,
+    response_signature,
+    # Metrics.
     jaccard,
     normalized_levenshtein,
     fast_content_ratio,
-    extract_tool_names,
     tool_sequence_lcs,
     tss,
-    tool_kv_set,
     argument_consistency,
     compare_tool_calls,
     compare_tool_calls_ordered_dedup,
     compare_tool_set_overlap,
-    tool_args_signature,
     action_histogram,
     js_kernel,
     global_alignment_kernel,
@@ -147,14 +151,6 @@ STRENGTHENINGS = {
 ORDER = list(METRIC_INFO.keys())
 
 
-def signature(p: dict) -> Optional[str]:
-    if not p["ok"]:
-        return None
-    return collapse_ws(p["content"]) + "\x00" + json.dumps(
-        tool_args_signature(p["tool_calls"]), ensure_ascii=False
-    )
-
-
 def metric_vector(pa: dict, pb: dict) -> Dict[str, float]:
     """Full per-pair metric vector for two usable (ok) parsed responses."""
     ca, cb = pa["content"], pb["content"]
@@ -162,7 +158,8 @@ def metric_vector(pa: dict, pb: dict) -> Dict[str, float]:
     kva, kvb = tool_kv_set(pa["tool_calls"]), tool_kv_set(pb["tool_calls"])
     ac = argument_consistency(kva, kvb)
     return {
-        "exact_match": 1.0 if signature(pa) == signature(pb) else 0.0,
+        # response_signature (compare/parsing.py) is the shared exact-match unit.
+        "exact_match": 1.0 if response_signature(pa) == response_signature(pb) else 0.0,
         "content_levenshtein": normalized_levenshtein(collapse_ws(ca), collapse_ws(cb)),
         "content_jaccard": jaccard(ca, cb),
         "tool_calls_exact": compare_tool_calls(pa["tool_calls"], pb["tool_calls"]),
@@ -184,19 +181,14 @@ def metric_vector(pa: dict, pb: dict) -> Dict[str, float]:
 # ------------------------------------------------------------------------------ IO
 
 def load_groups(base_dir: str) -> Dict[str, Dict[str, dict]]:
-    """event_id -> {run_id: parsed response}. Same grouping the analyzers use."""
-    run_dirs = sorted(
-        d for d in os.listdir(base_dir)
-        if d.startswith("run_") and os.path.isdir(os.path.join(base_dir, d))
-    )
+    """event_id -> {run_id: parsed response}. Same grouping (and same IO) the analyzers use."""
+    run_dirs = find_run_dirs(base_dir)
     if not run_dirs:
         raise SystemExit(f"No run_* subdirs found in {base_dir}")
     groups: Dict[str, Dict[str, dict]] = {}
-    for run in run_dirs:
-        path = os.path.join(base_dir, run, "per_request_lifecycle_metrics.json")
-        if not os.path.exists(path):
-            continue
-        for rec in json.load(open(path)):
+    for rd in run_dirs:
+        run = os.path.basename(rd)
+        for rec in load_run(rd):
             eid = rec.get("event_id")
             if eid is None:
                 continue

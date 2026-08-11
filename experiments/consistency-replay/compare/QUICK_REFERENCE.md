@@ -4,13 +4,20 @@
 
 ```python
 from compare import (
+    # Parsing / IO — the ONLY place records are read (parsing.py)
+    find_run_dirs,
+    load_records,             # one metrics file → List[dict]
+    load_run,                 # one run_* dir → List[dict] (tolerant)
+    parse_response,           # raw record → parsed response
+    parse_records,            # List[dict] raw → List[dict] parsed
+    extract_profile,          # one run's raw records → profile dict
+    request_key, session_key, event_key,
+
     # Level 2: Full traces
-    extract_profile,
     compare_profiles,
 
-    # Level 1: Individual responses
+    # Level 1: Individual responses (PARSED input only)
     compare_responses,
-    parse_response,
 
     # Content similarity
     normalized_levenshtein,   # exact edit distance (headline figure)
@@ -39,6 +46,11 @@ from compare import (
 )
 ```
 
+> **Parse once, then compare.** `parsing.py` owns every read of a file or a raw record; the
+> comparators only compare. `compare_responses` and `response_signature` raise `ValueError`
+> on a dict with no `ok` key rather than parsing it for you, so call `parse_response` /
+> `parse_records` / `extract_profile` up front in your run script.
+
 > **No composite score.** Neither `compare_responses` nor `compare_profiles` returns an
 > `overall_similarity`. Each metric measures a different thing in a different unit, so a single
 > weighted average would need arbitrary weights and mean nothing precise. For one grounded
@@ -47,10 +59,12 @@ from compare import (
 
 ## Two Entry Points
 
+Both take already-parsed input. Parsing happens once, in the caller.
+
 ### Level 2: Compare Profiles
 ```python
-# Extract a profile from one run's records
-profile = extract_profile(records: List[dict]) → dict
+# Parse: one run's records → a profile (this is the parsing step)
+profile = extract_profile(load_records(path)) → dict
 
 # Compare two profiles
 result = compare_profiles(profile_a, profile_b) → Dict[str, float]
@@ -61,10 +75,10 @@ session_depth_agreement, error_rate_agreement, response_similarity, exact_match
 
 ### Level 1: Compare Responses
 ```python
-# Parse a record (optional — compare_responses parses raw dicts itself)
-parsed = parse_response(record: dict) → dict
+# Parse first — REQUIRED. A raw record raises ValueError in compare_responses.
+parsed = parse_response(record: dict) → dict          # or parse_records(records)
 
-# Compare two responses
+# Compare two parsed responses
 result = compare_responses(response_a, response_b) → Dict[str, float]
 ```
 
@@ -101,8 +115,8 @@ print(f"Response similarity: {result['response_similarity']:.1%}")
 
 ### Find divergence point
 ```python
-responses_a = [parse_response(r) for r in records_a]
-responses_b = [parse_response(r) for r in records_b]
+responses_a = parse_records(records_a)
+responses_b = parse_records(records_b)
 for i, (ra, rb) in enumerate(zip(responses_a, responses_b)):
     sim = compare_responses(ra, rb)
     if sim["content_levenshtein"] < 0.9:
@@ -131,13 +145,14 @@ for i, (ra, rb) in enumerate(zip(responses_a, responses_b)):
 - `tool_calls_ordered_dedup` — order-preserving, arg-aware, ignores adjacent repeats
 - `tool_sequence_similarity` — LCS ratio over tool names
 - `tool_set_overlap` — Jaccard of tools
-- `tool_args_consistency` — Jaccard over {(tool.key, value)} pairs (0.0 if no args)
+- `tool_args_consistency` — Jaccard over {(tool.key, value)} pairs (**1.0** when neither side has
+  args — undefined, folded to 1.0 in this fixed-width vector; see `argument_consistency`)
 - `finish_reason_agreement` — same ending? (1/0)
 
 ## Notes
 
 - All metrics in [0, 1], where 1 = identical, 0 = completely different
-- All functions are pure (no side effects)
+- Every comparison function is pure; only `parsing.py`'s `load_*` helpers touch the filesystem
 - No external dependencies (standard library only)
 - If either response errored (`ok=False`), every response metric is 0.0
 - See `README.md` for full documentation
@@ -146,10 +161,13 @@ for i, (ra, rb) in enumerate(zip(responses_a, responses_b)):
 
 | File | Purpose |
 |------|---------|
-| response_similarity.py | Level 1: response comparison + all primitives |
+| parsing.py | **The only parsing layer**: file IO, raw record → parsed, profiles, grouping keys, tool-call extraction, signatures |
+| response_similarity.py | Level 1: response comparison + the string / tool-call metrics |
 | traces_similarity.py | Level 2: profile comparison |
 | kernels.py | Paper-grounded trajectory kernels (JS, GAK) |
-| compare_runs.py | CLI: compare two runs' metrics files |
+| compare_runs.py | CLI: compare two runs' metrics files — the only caller that parses |
 | __init__.py | Module exports |
 | test_compare.py | Unit tests |
 | README.md | Full documentation |
+
+Dependency direction is one-way: `parsing` ← `response_similarity` ← `traces_similarity`.

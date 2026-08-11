@@ -6,14 +6,42 @@ responses and traces.
 ## Design Philosophy
 
 **All comparison functions follow a simple contract:**
-- Input: two comparable objects (responses or profiles)
+- Input: two comparable objects (**already-parsed** responses, or profiles)
 - Output: `Dict[str, float]` with metrics normalized to [0, 1]
-- No aggregation, no statistics, no side effects — just comparison
+- No aggregation, no statistics, no side effects, **no parsing** — just comparison
 
 This makes the library composable: any caller can use it for any comparison task. It is the
 **single source of truth** for per-pair metrics; the analyzers (`analyze_consistency.py`,
 `consistency_statistics.py`) and the viewer/witness exporters all import these primitives
 so every caller shares one metric definition and owns only the aggregation layer.
+
+### Parsing is one module, and callers own it
+
+`parsing.py` is the single place that touches a file, a raw record, or a JSON string.
+Nothing in it computes a metric; nothing outside it parses.
+
+```
+parsing.py            files + raw records → parsed responses / profiles   (no metrics)
+  ↑
+response_similarity.py Level 1 comparators + the string/tool metrics       (no parsing)
+  ↑
+traces_similarity.py   Level 2 profile comparison                          (no parsing)
+kernels.py             positive-definite trajectory kernels (JS, GAK)
+compare_runs.py        the CLI — the only place in the library that parses
+```
+
+The comparators therefore **refuse** raw records rather than quietly parsing them:
+`compare_responses(a, b)` and `response_signature(r)` raise `ValueError` when handed a dict
+with no `ok` key. Parse once, up front, and pass the parsed data down — that way a record is
+never re-parsed per pairwise comparison, and a raw record can't be silently compared as
+though it were parsed.
+
+```python
+from compare import load_records, parse_records, compare_responses
+
+responses = parse_records(load_records(path))       # parse once, here
+compare_responses(responses[0], responses[1])       # comparators only compare
+```
 
 ## Two-Level Architecture
 
@@ -53,7 +81,7 @@ Compare two individual response records (one turn of a conversation).
 ```python
 from compare import compare_responses, parse_response
 
-response_a = parse_response(record_a)  # or pass a raw dict; compare_responses parses it
+response_a = parse_response(record_a)  # required — compare_responses will not parse for you
 response_b = parse_response(record_b)
 
 similarity = compare_responses(response_a, response_b)
@@ -77,19 +105,37 @@ similarity = compare_responses(response_a, response_b)
 
 ## Core Functions
 
-### Profile Functions
+### Parsing / IO (`parsing.py`)
+
+Everything that reads a file or a raw record. Import these from `compare`; call them from your
+run script, not from inside a comparison loop.
 
 | Function | Input | Output |
 |----------|-------|--------|
-| `extract_profile(records)` | List[dict] from per_request_lifecycle_metrics | dict of profile features |
-| `compare_profiles(p1, p2)` | two profile dicts | Dict[str, float] |
+| `find_run_dirs(base)` | a reports base dir | sorted list of `run_*` paths |
+| `load_records(path)` | one metrics JSON file | List[dict]; raises `ValueError` on an unrecognized shape |
+| `load_run(run_dir)` | a `run_*` dir | List[dict] — tolerant wrapper (`[]` if absent/unreadable) |
+| `parse_response(record)` | one raw record | Dict[str, Any] (ok, has_output, content, tool_calls, timing, tokens, …) |
+| `parse_records(records)` | List[dict] raw | List[dict] parsed |
+| `extract_profile(records)` | List[dict] raw, one run | dict of profile features (incl. parsed `responses`) |
+| `require_parsed(r, what)` | a dict | the dict, or `ValueError` if it isn't parsed |
+| `request_key` / `session_key` / `event_key` | one raw record | str — grouping identity |
 
-### Response Functions
+Both tool-call wire shapes are accepted: `{"function": {"name", "arguments"}}` and the flat
+`{"name", "arguments"}` used by the viewer's flattened summaries.
+
+### Profile Functions (`traces_similarity.py`)
 
 | Function | Input | Output |
 |----------|-------|--------|
-| `parse_response(record)` | one record from a metrics file | Dict[str, Any] (ok, has_output, content, tool_calls, timing, tokens, …) |
-| `compare_responses(r1, r2)` | two response dicts | Dict[str, float] |
+| `compare_profiles(p1, p2)` | two profile dicts from `extract_profile` | Dict[str, float] |
+| `compare_response_lists(a, b)` | two lists of **parsed** responses | Dict[str, float] |
+
+### Response Functions (`response_similarity.py`)
+
+| Function | Input | Output |
+|----------|-------|--------|
+| `compare_responses(r1, r2)` | two **parsed** response dicts | Dict[str, float] |
 
 ### Helper Functions
 
@@ -98,7 +144,7 @@ Content similarity (all in [0, 1]):
 - `fast_content_ratio(a, b)` → float — approximate (difflib), for large run × run matrices
 - `jaccard(a, b)` → float — word-set overlap
 
-Tool-call names / signatures:
+Tool-call names / signatures (in `parsing.py` — these read raw tool-call dicts):
 - `extract_tool_names(tool_calls)` → Tuple[str, ...]
 - `tool_signature(tool_calls)` → Tuple of (name, sorted arg **keys**)
 - `tool_args_signature(tool_calls)` → Tuple of (name, canonical arg **values**)
@@ -124,13 +170,10 @@ Trajectory kernels (positive-definite, normalized to (0, 1] with k(x, x) = 1):
 ### Simple: compare two runs
 
 ```python
-from compare import extract_profile, compare_profiles
-import json
+from compare import load_records, extract_profile, compare_profiles
 
-with open("run_1/per_request_lifecycle_metrics.json") as f:
-    records_1 = json.load(f)
-with open("run_2/per_request_lifecycle_metrics.json") as f:
-    records_2 = json.load(f)
+records_1 = load_records("run_1/per_request_lifecycle_metrics.json")
+records_2 = load_records("run_2/per_request_lifecycle_metrics.json")
 
 result = compare_profiles(extract_profile(records_1), extract_profile(records_2))
 print(f"Tool-sequence similarity: {result['tool_sequence_similarity']:.1%}")
@@ -165,10 +208,10 @@ print(f"Std dev:                       {statistics.stdev(sims):.1%}")
 ### Fine-grained: find divergence point
 
 ```python
-from compare import compare_responses, parse_response
+from compare import compare_responses, parse_records
 
-responses_a = [parse_response(r) for r in records_a]
-responses_b = [parse_response(r) for r in records_b]
+responses_a = parse_records(records_a)   # parse once; the comparator won't do it for you
+responses_b = parse_records(records_b)
 
 for i, (resp_a, resp_b) in enumerate(zip(responses_a, responses_b)):
     sim = compare_responses(resp_a, resp_b)
@@ -179,7 +222,10 @@ for i, (resp_a, resp_b) in enumerate(zip(responses_a, responses_b)):
 
 ## Integration with Existing Code
 
-The library is standalone and is imported wherever per-pair metrics are needed:
+The library is standalone and is imported wherever parsing or per-pair metrics are needed. All
+four sibling scripts get their record reading, grouping keys, tool-call extraction and
+exact-match signature from `compare.parsing`, so none of them re-implements the derive step;
+each owns only its own aggregation:
 
 - `analyze_consistency.py` — imports the primitives for group-level modal/distinct/CV metrics.
 - `consistency_statistics.py` — uses the primitives and kernels for the U-statistic θ,

@@ -36,22 +36,24 @@ import sys
 from collections import defaultdict
 from typing import Any, Dict, List
 
-# Import the analyzer's primitives so metrics match exactly.
+# Parsing, grouping and metric primitives come straight from compare/ — the same definitions
+# the analyzers use, so the viewer's numbers match theirs exactly. Only `cv` below is
+# analyze_consistency's own aggregation helper.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analyze_consistency import (  # noqa: E402
+from compare import (  # noqa: E402
     find_run_dirs,
     load_run,
     parse_response,
     request_key,
     session_key,
     event_key,
+    response_signature,
     normalized_levenshtein,
     jaccard,
-    tool_args_signature,
     collapse_ws,
     strip_ws,
-    cv,
 )
+from analyze_consistency import cv  # noqa: E402
 
 # Paper-metric kernels (Yagubyan TSS/AC, Raj JS/GAK). Computed per run-pair per group so the
 # viewer can show them on a specific A-vs-B comparison at a specific call position — the
@@ -218,14 +220,10 @@ def build() -> int:
         # Whitespace-collapsed so pure formatting differences (e.g. `{"content":` vs
         # `{ "content":`, or pretty-printed vs single-line JSON) don't count as distinct —
         # this drives the "N distinct" count, cluster coloring, and exact-match pill.
-        def sig(v):
-            toolsig = json.dumps(
-                tool_args_signature(
-                    [{"function": {"name": t["name"], "arguments": t["arguments"]}} for t in v["tool_calls"]]
-                ),
-                ensure_ascii=False,
-            )
-            return collapse_ws(v["content"]) + "\x00" + toolsig
+        # response_signature (compare/parsing.py) is the shared definition; a version dict
+        # carries ok / content / tool_calls, and its flattened {"name", "arguments"} calls are
+        # read directly by the tool-call extractor.
+        sig = response_signature
 
         # Display string for lexical comparison (content, or tool call if no content).
         # Whitespace-normalized so the graded metrics (Content similarity, Output Jaccard)

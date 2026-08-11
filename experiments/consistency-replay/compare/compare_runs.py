@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Compare two trace runs using the compare library.
 
+This is the run script: it owns the whole parsing process (load_records -> extract_profile /
+parse_records, all from compare.parsing) and hands only comparison-ready inputs to
+compare_profiles / compare_responses, which do no parsing of their own.
+
 Usage:
     python compare_runs.py <path_to_run_1> <path_to_run_2>
 
@@ -11,35 +15,23 @@ Example:
 """
 
 import sys
-import json
 import argparse
 from pathlib import Path
 
-# Add compare library to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Put the directory CONTAINING the compare package on the path (this file lives inside
+# the package, so its own parent is the package dir, not the importable root).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from compare import (
+    # Parsing (this script is the only place the library parses).
+    load_records,
     extract_profile,
-    compare_profiles,
-    parse_response,
-    compare_responses,
     response_signature,
     extract_tool_names,
+    # Comparison.
+    compare_profiles,
+    compare_responses,
 )
-
-
-def load_records(filepath):
-    """Load records from a metrics JSON file."""
-    with open(filepath) as f:
-        data = json.load(f)
-    
-    # Handle various data formats
-    if isinstance(data, list):
-        return data
-    elif isinstance(data, dict):
-        return data.get("contents", data.get("records", []))
-    else:
-        raise ValueError(f"Unexpected data format in {filepath}")
 
 
 def print_header(text):
@@ -60,7 +52,9 @@ def compare_runs(run_1_path, run_2_path, verbose=False):
     records_2 = load_records(run_2_path)
     print(f"  ✓ Loaded {len(records_2)} records")
     
-    # Extract profiles
+    # Parse: this is the one parsing step. extract_profile parses every record once and
+    # stores the results in profile["responses"], so every comparison below (including the
+    # verbose per-turn pass) reads parsed data rather than re-parsing.
     print("\nExtracting profiles...")
     profile_1 = extract_profile(records_1)
     profile_2 = extract_profile(records_2)
@@ -131,8 +125,9 @@ def compare_runs(run_1_path, run_2_path, verbose=False):
     if verbose:
         print_header("PER-TURN ANALYSIS")
 
-        responses_1 = [parse_response(r) for r in records_1]
-        responses_2 = [parse_response(r) for r in records_2]
+        # Already parsed by extract_profile above — reuse, don't re-parse.
+        responses_1 = profile_1["responses"]
+        responses_2 = profile_2["responses"]
 
         divergences = 0
         identical = 0

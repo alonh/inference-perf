@@ -74,10 +74,16 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 # sys.path so both imports resolve regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare import (  # noqa: E402
-    collapse_ws,
-    jaccard,
+    # Parsing: the single source of both the parse and the derived comparison units.
+    find_run_dirs,
+    load_run,
     parse_response,
-    tool_args_signature,
+    event_key,
+    extract_tool_names,
+    tool_kv_set,
+    response_signature,
+    # Metrics.
+    jaccard,
     fast_content_ratio,
     tss,
     argument_consistency,
@@ -86,12 +92,7 @@ from compare import (  # noqa: E402
     js_divergence,
     global_alignment_kernel,
 )
-from analyze_consistency import (  # noqa: E402
-    find_run_dirs,
-    judge_group,
-    event_key,
-    load_run,
-)
+from analyze_consistency import judge_group  # noqa: E402
 
 
 # ------------------------------------------------------------------ trajectories
@@ -122,36 +123,17 @@ class Feature:
     __slots__ = ("ok", "has_output", "content", "signature", "names", "kv", "hist")
 
     def __init__(self, record: dict):
+        # Every derived field comes from compare/parsing.py, so this struct is a cache of
+        # the shared definitions rather than a second implementation of them.
         p = parse_response(record)
         self.ok = p["ok"]
         self.has_output = p["has_output"]
         self.content = p["content"]
-        names: List[str] = []
-        kv: set = set()
-        for tc in p["tool_calls"]:
-            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-            name = fn.get("name") or "<unnamed>"
-            names.append(name)
-            args_raw = fn.get("arguments")
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            if isinstance(args, dict):
-                for k, v in args.items():
-                    # Namespace keys by tool so identical arg names on different tools
-                    # don't overlap; canonicalize the value so ordering can't fork it.
-                    kv.add((f"{name}.{k}", json.dumps(v, sort_keys=True, ensure_ascii=False)))
-        self.names: Tuple[str, ...] = tuple(names)
-        self.kv = frozenset(kv)
+        self.names: Tuple[str, ...] = extract_tool_names(p["tool_calls"])
+        self.kv = tool_kv_set(p["tool_calls"])
         self.hist = action_histogram(self.names)
-        self.signature: Optional[str] = None
-        if self.ok:
-            # Whitespace-collapsed content + canonical tool args, so exact-match ignores
-            # pure formatting differences (matches export_viewer_data's sig()).
-            self.signature = collapse_ws(self.content) + "\x00" + json.dumps(
-                tool_args_signature(p["tool_calls"]), ensure_ascii=False
-            )
+        # Whitespace-collapsed content + canonical tool args; None when not ok.
+        self.signature: Optional[str] = response_signature(p)
 
 
 RunMap = Dict[str, Feature]  # event_id -> features

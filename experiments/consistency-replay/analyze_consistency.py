@@ -40,8 +40,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
-import hashlib
 import json
 import math
 import os
@@ -51,102 +49,34 @@ from collections import Counter, defaultdict
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
-# The per-pair metric primitives live in compare/ (the single source of truth). This module
-# owns only the aggregation layer (modal fractions, per-trace roll-up, the LLM judge); the
-# low-level string/tool comparators are imported so every caller shares one definition.
+# Parsing AND the per-pair metric primitives live in compare/ (the single source of truth):
+# compare.parsing owns everything that reads a file or a raw record (load_run, parse_response,
+# the event/session/request keys, the exact-match signature), and the similarity modules own
+# the comparators. This module owns only the aggregation layer (modal fractions, per-trace
+# roll-up, the LLM judge).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare import (  # noqa: E402
+    # Parsing / IO / grouping.
+    find_run_dirs,
+    load_run,
     parse_response,
-    normalized_levenshtein,
-    jaccard,
-    collapse_ws,
-    strip_ws,
+    parse_records,
+    request_key,
+    session_key,
+    event_key,
+    response_signature,
     tool_signature,
     tool_args_signature,
+    # Metrics.
+    normalized_levenshtein,
+    jaccard,
 )
-
-# ----------------------------------------------------------------------------- IO
-
-
-def find_run_dirs(base: str) -> List[str]:
-    dirs = sorted(glob.glob(os.path.join(base, "run_*")))
-    return [d for d in dirs if os.path.isdir(d)]
-
-
-def load_run(run_dir: str) -> List[dict]:
-    """Load per_request_lifecycle_metrics.json from a run dir (list of records)."""
-    path = os.path.join(run_dir, "per_request_lifecycle_metrics.json")
-    if not os.path.exists(path):
-        return []
-    with open(path) as f:
-        data = json.load(f)
-    # The report may wrap the list; accept either a bare list or {"contents": [...]}.
-    if isinstance(data, dict):
-        data = data.get("contents", data.get("records", []))
-    return data if isinstance(data, list) else []
-
-
-# ------------------------------------------------------------------- extraction
-
-
-def request_key(record: dict) -> str:
-    """Stable hash of the request payload. Identical inputs -> identical key.
-
-    Used as a fallback grouping key when a record lacks an event_id, and to validate
-    that every response in an event_id group really was fed identical input.
-    """
-    req = record.get("request")
-    if req is None:
-        return "no-request"
-    try:
-        obj = json.loads(req) if isinstance(req, str) else req
-        # messages + tools + generation params define the input; drop nothing —
-        # canonicalize with sorted keys so formatting can't fork the group.
-        canon = json.dumps(obj, sort_keys=True, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError):
-        canon = req if isinstance(req, str) else str(req)
-    return hashlib.sha1(canon.encode("utf-8")).hexdigest()
-
-
-def session_key(record: dict) -> str:
-    """Per-trace identifier: the recorded session_id.
-
-    Each source trace maps to one session_id; every call position within that trace
-    shares it. Falls back to a request-payload-derived anchor only if session_id is
-    absent (older metrics that never populated it).
-    """
-    sid = record.get("session_id") or (record.get("info") or {}).get("session_id")
-    if sid:
-        return str(sid)
-    req = record.get("request")
-    try:
-        obj = json.loads(req) if isinstance(req, str) else req
-        msgs = obj.get("messages") or []
-        # First message content is the per-trace anchor (system/context prompt).
-        anchor = (msgs[0].get("content") or "") if msgs else ""
-        anchor = anchor if isinstance(anchor, str) else json.dumps(anchor, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        anchor = str(req)[:512]
-    return "trace_" + hashlib.sha1(anchor.encode("utf-8")).hexdigest()[:10]
-
-
-def event_key(record: dict) -> str:
-    """Per-call-position identifier used to group identical-input responses.
-
-    Prefer the recorded event_id — it is unique within a run and byte-identical across
-    runs for the same (trace, call-position), so it groups exactly the repeated outputs
-    of one identical input. Falls back to (session, request-hash) if event_id is absent.
-    """
-    eid = record.get("event_id") or (record.get("info") or {}).get("event_id")
-    if eid:
-        return str(eid)
-    return session_key(record) + "::" + request_key(record)[:12]
 
 
 # ---------------------------------------------------------------------- metrics
-# parse_response, normalized_levenshtein, jaccard, collapse_ws, strip_ws, tool_signature,
-# and tool_args_signature now come from compare/ (imported above). mean_pairwise / cv /
-# agreement_fraction below are aggregation helpers unique to this run-anonymous roll-up.
+# Every parsing helper and per-pair metric comes from compare/ (imported above).
+# mean_pairwise / cv / agreement_fraction below are aggregation helpers unique to this
+# run-anonymous roll-up.
 
 
 def mean_pairwise(strings: List[str], fn) -> Optional[float]:
@@ -178,7 +108,7 @@ def agreement_fraction(items: List[Any]) -> Optional[float]:
 
 
 def analyze_group(records: List[dict]) -> Dict[str, Any]:
-    parsed = [parse_response(r) for r in records]
+    parsed = parse_records(records)
     n_total = len(parsed)
     ok = [p for p in parsed if p["ok"]]
     errors = Counter(p["error"] for p in parsed if not p["ok"])
@@ -198,11 +128,9 @@ def analyze_group(records: List[dict]) -> Dict[str, Any]:
 
     # Exact reproducibility. The "response" is content PLUS any tool calls (canonical
     # args), so a tool turn with identical empty text but different args is correctly
-    # counted as non-identical rather than byte-identical.
-    signatures = [
-        collapse_ws(c) + "\x00" + json.dumps(tool_args_signature(p["tool_calls"]), ensure_ascii=False)
-        for c, p in zip(contents, ok)
-    ]
+    # counted as non-identical rather than byte-identical. response_signature is the shared
+    # definition of that unit (compare/parsing.py) — every caller counts the same thing.
+    signatures = [response_signature(p) for p in ok]
     distinct = Counter(signatures)
     result["exact"] = {
         "distinct_responses": len(distinct),

@@ -6,14 +6,24 @@ All metrics are normalized to [0, 1]:
   - 0 = completely different
   - 1 = identical
   - 0.5 = moderate similarity
+
+This module only COMPARES. It never reads a file and never parses a raw record: its inputs
+are already-parsed responses (parsing.parse_response) and the extracted tool-call structures
+that parsing.py produces. Hand it a raw record and it raises rather than quietly parsing —
+see parsing.require_parsed for why.
 """
 
 import difflib
-import json
-import statistics
-from collections import Counter
 from itertools import groupby
-from typing import AbstractSet, Any, Dict, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, List, Optional, Sequence, Tuple
+
+from .parsing import (
+    collapse_ws,
+    extract_tool_names,
+    require_parsed,
+    tool_args_signature,
+    tool_kv_set,
+)
 
 
 def normalized_levenshtein(a: str, b: str) -> float:
@@ -67,159 +77,6 @@ def jaccard(a: str, b: str) -> float:
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
-
-
-def collapse_ws(s: str) -> str:
-    """Collapse every run of whitespace to a single space and trim ends.
-
-    For free-form response *content* (prose): normalizes indentation / trailing spaces /
-    line-wrap differences while preserving the single spaces between words, so genuinely
-    different text stays different.
-    """
-    return " ".join((s or "").split())
-
-
-def strip_ws(s: str) -> str:
-    """Remove ALL whitespace.
-
-    For *tool arguments* (JSON / structural), where inter-token spacing is pure formatting:
-    makes `{ "content":` and `{"content":` compare equal. Valid JSON already round-trips
-    whitespace-free through json.loads/dumps; this handles the unparseable-args fallback.
-    """
-    return "".join((s or "").split())
-
-
-def _call_fields(tc: Any) -> Tuple[Optional[str], Any]:
-    """Unpack one tool-call entry into (name, raw-arguments).
-
-    Centralizes the defensive `tc["function"]["name"] / ["arguments"]` access repeated
-    across every tool-call helper: a non-dict entry, a missing `function`, or a null
-    `function` all yield (None, None) rather than raising.
-    """
-    fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-    return fn.get("name"), fn.get("arguments")
-
-
-def parse_response(record: dict) -> Dict[str, Any]:
-    """Extract the fields we compare from a per-request record.
-
-    Returns dict with: ok(bool), has_output(bool), content(str), reasoning(str),
-    tool_calls(list), finish_reason(str|None), completion_tokens(int|None),
-    prompt_tokens(int|None), total_tokens(int|None), start_time(float|None),
-    end_time(float|None), error(str|None).
-
-    `ok` means the response parsed into a well-formed choice/message — NOT that the model
-    produced anything usable. `has_output` is the stricter flag: True only when the response
-    is ok AND carries actual content or tool calls. An ok response can have has_output=False
-    — e.g. a turn that spends its whole token budget on reasoning, hits finish_reason=length,
-    and emits an empty message. Such empty outputs would otherwise compare as vacuously
-    identical (content_levenshtein("","")=1.0), so downstream metrics use has_output to treat
-    them as their own category rather than as perfect agreement.
-
-    Timing (start_time / end_time) is read from the top-level record and is populated even
-    for errored responses — a request can fail yet still have taken time. These are the raw
-    wall-clock bounds; any duration is derived downstream in the metric layer. Token counts
-    come from the response body's `usage` block.
-    """
-    out: Dict[str, Any] = {
-        "ok": False,
-        "has_output": False,
-        "content": "",
-        "reasoning": "",
-        "tool_calls": [],
-        "finish_reason": None,
-        "completion_tokens": None,
-        "prompt_tokens": None,
-        "total_tokens": None,
-        "start_time": None,
-        "end_time": None,
-        "error": None,
-    }
-
-    # Timing lives at the record level (not in the response body), so capture it before any
-    # error short-circuit — an errored/empty response can still carry meaningful bounds.
-    out["start_time"], out["end_time"] = record.get("start_time"), record.get("end_time")
-
-    if record.get("error"):
-        err = record["error"]
-        out["error"] = err.get("error_type") if isinstance(err, dict) else str(err)
-        return out
-
-    resp = record.get("response")
-    if not resp:
-        out["error"] = "empty_response"
-        return out
-    try:
-        body = json.loads(resp) if isinstance(resp, str) else resp
-    except (json.JSONDecodeError, TypeError):
-        # Non-JSON body (e.g. gateway HTML error). Treat as error but keep text.
-        out["error"] = "non_json_response"
-        out["content"] = resp if isinstance(resp, str) else str(resp)
-        return out
-
-    choices = body.get("choices") or []
-    if not choices:
-        out["error"] = "no_choices"
-        return out
-    msg = choices[0].get("message", {}) or {}
-    out["content"] = (msg.get("content") or "").strip()
-    out["reasoning"] = (msg.get("reasoning_content") or "").strip()
-    out["tool_calls"] = msg.get("tool_calls") or []
-    out["finish_reason"] = choices[0].get("finish_reason")
-    usage = body.get("usage") or {}
-    out["completion_tokens"] = usage.get("completion_tokens")
-    out["prompt_tokens"] = usage.get("prompt_tokens")
-    out["total_tokens"] = usage.get("total_tokens")
-    out["ok"] = True
-    # Usable AND non-empty: distinguishes a real answer from an empty completion (e.g. a
-    # length-truncated reasoning turn that emitted no content or tool calls).
-    out["has_output"] = bool(out["content"] or out["tool_calls"])
-    return out
-
-
-def extract_tool_names(tool_calls: List[dict]) -> Tuple[str, ...]:
-    """Extract ordered tool names from tool_calls list."""
-    names = []
-    for tc in tool_calls:
-        name, _ = _call_fields(tc)
-        if name:
-            names.append(name)
-    return tuple(names)
-
-
-def tool_signature(tool_calls: List[dict]) -> Tuple:
-    """Comparable signature of tool calls: sequence of (name, sorted arg keys).
-
-    Compares tool names and argument structure, but not argument values.
-    """
-    sig = []
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            keys = tuple(sorted(args.keys())) if isinstance(args, dict) else ("<non-dict-args>",)
-        except (json.JSONDecodeError, TypeError):
-            keys = ("<unparseable-args>",)
-        sig.append((name, keys))
-    return tuple(sig)
-
-
-def tool_args_signature(tool_calls: List[dict]) -> Tuple:
-    """Full signature including canonical arg VALUES.
-
-    Whitespace-insensitive: valid JSON is re-serialized canonically (so key order and
-    inter-token spacing don't matter), and the unparseable fallback is whitespace-collapsed.
-    """
-    sig = []
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            canon = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        except (json.JSONDecodeError, TypeError):
-            canon = strip_ws(str(args_raw))
-        sig.append((name, canon))
-    return tuple(sig)
 
 
 def compare_tool_calls(calls_a: List[dict], calls_b: List[dict]) -> float:
@@ -336,27 +193,6 @@ def compare_tool_arguments(calls_a: List[dict], calls_b: List[dict]) -> Optional
     return argument_consistency(tool_kv_set(calls_a), tool_kv_set(calls_b))
 
 
-def tool_kv_set(tool_calls: List[dict]) -> frozenset:
-    """Flatten a turn's tool calls to a {(tool.key, canonical-value)} set (Yagubyan AC unit).
-
-    Keys are namespaced by tool name so identical arg names on different tools don't
-    collide; values are canonical JSON so key order / spacing can't fork them. This is the
-    precomputed unit both `compare_tool_arguments` and `argument_consistency` compare.
-    """
-    kv: set = set()
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        name = name or "<unnamed>"
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-        except (json.JSONDecodeError, TypeError):
-            args = {}
-        if isinstance(args, dict):
-            for k, v in args.items():
-                kv.add((f"{name}.{k}", json.dumps(v, sort_keys=True, ensure_ascii=False)))
-    return frozenset(kv)
-
-
 def argument_consistency(kv_a: AbstractSet, kv_b: AbstractSet) -> Optional[float]:
     """Argument Consistency (Yagubyan Def. 4): Jaccard over two flattened {(k,v)} sets.
 
@@ -393,41 +229,22 @@ def argument_consistency(kv_a: AbstractSet, kv_b: AbstractSet) -> Optional[float
     return len(kv_a & kv_b) / len(kv_a | kv_b)
 
 
-def response_signature(response: dict) -> Optional[str]:
-    """Exact-match unit: collapse_ws(content) + canonical tool-args.
-
-    None if the response errored. Matches the signature used by analyze_consistency.py and
-    export_viewer_data.py, so a tool turn with identical empty text but different args is
-    correctly counted as non-identical.
-    """
-    if "ok" not in response:
-        response = parse_response(response)
-    if not response.get("ok"):
-        return None
-    content = response.get("content", "")
-    calls = response.get("tool_calls") or []
-    return collapse_ws(content) + "\x00" + json.dumps(
-        tool_args_signature(calls), ensure_ascii=False
-    )
-
-
 def compare_responses(response_a: dict, response_b: dict) -> Dict[str, float]:
     """Compare two individual responses, returning all metrics.
 
-    Input: two dicts with keys content, tool_calls, finish_reason, etc.
-           (typically from parse_response() or raw response records)
-    
+    Input: two PARSED responses — dicts from parsing.parse_response, with keys ok, content,
+           tool_calls, finish_reason, etc. A raw record raises ValueError; parse it once in
+           the run script instead (a pairwise sweep would otherwise re-parse the same record
+           on every comparison).
+
     Output: dict mapping metric name → similarity in [0, 1].
             All metrics always present (no None values).
     """
-    # Parse if needed
-    if "ok" not in response_a:
-        response_a = parse_response(response_a)
-    if "ok" not in response_b:
-        response_b = parse_response(response_b)
-    
+    require_parsed(response_a, "response_a")
+    require_parsed(response_b, "response_b")
+
     result = {}
-    
+
     # If either response had an error, similarity is 0
     if not response_a.get("ok") or not response_b.get("ok"):
         return {
@@ -440,20 +257,20 @@ def compare_responses(response_a: dict, response_b: dict) -> Dict[str, float]:
             "tool_args_consistency": 0.0,
             "finish_reason_agreement": 0.0,
         }
-    
+
     content_a = response_a.get("content", "")
     content_b = response_b.get("content", "")
-    
+
     # Content similarity
     result["content_levenshtein"] = normalized_levenshtein(
         collapse_ws(content_a), collapse_ws(content_b)
     )
     result["content_jaccard"] = jaccard(content_a, content_b)
-    
+
     # Tool calls
     calls_a = response_a.get("tool_calls") or []
     calls_b = response_b.get("tool_calls") or []
-    
+
     result["tool_calls_exact"] = compare_tool_calls(calls_a, calls_b)
 
     # Order-preserving, arg-aware, collapsing only back-to-back repeats (see function).
@@ -463,12 +280,12 @@ def compare_responses(response_a: dict, response_b: dict) -> Dict[str, float]:
     names_a = extract_tool_names(calls_a)
     names_b = extract_tool_names(calls_b)
     result["tool_sequence_similarity"] = tool_sequence_lcs(names_a, names_b)
-    
+
     # Tool set overlap
     tools_a = set(names_a)
     tools_b = set(names_b)
     result["tool_set_overlap"] = compare_tool_set_overlap(tools_a, tools_b)
-    
+
     # Tool argument consistency. This dict is a fixed-width vector (no None allowed), so the
     # empty-vs-empty case (AC undefined) is folded to 1.0 — matching the sibling structural
     # metrics above (tool_calls_exact / tool_sequence_similarity / tool_set_overlap all score
@@ -476,7 +293,7 @@ def compare_responses(response_a: dict, response_b: dict) -> Dict[str, float]:
     # disagreed. See argument_consistency's docstring for the full fold policy.
     ac = compare_tool_arguments(calls_a, calls_b)
     result["tool_args_consistency"] = ac if ac is not None else 1.0
-    
+
     # Finish reason agreement
     reason_a = response_a.get("finish_reason")
     reason_b = response_b.get("finish_reason")
