@@ -37,15 +37,36 @@ proposed in two 2026 papers, with their statistical machinery:
       kernel over per-trajectory action histograms (composition) and a Global Alignment
       Kernel over ordered tool sequences (ordering).
 
+SCOPE — everything is computed WITHIN A SESSION. A session (one recorded trace / task) is
+the unit of behavior: its events are the turns of one agent episode, and only repeated runs
+OF THE SAME SESSION are comparable. Two consequences drive the whole design:
+
+  * The U-statistic's INSTANCE is a session and its SAMPLE UNIT is a run. For session m with
+    n runs, theta_m = C(n,2)^-1 * sum_{i<j} k(run_i, run_j | session m) — n=10 runs give 45
+    pairs. Pooling events across sessions (the pre-fix behavior) event-weighted the estimate,
+    so a 15-event session counted ~7x a 2-event one, and no per-session number was reported
+    at all.
+  * A TRAJECTORY is a session's whole action sequence — the tool names of event 000, then
+    001, ... concatenated in event order. Applying the "trajectory" kernels (GAK, JS) to a
+    single turn's tool list (the pre-fix behavior) made them degenerate: with almost every
+    turn emitting 0 or 1 tool call, ordering and composition had nothing to measure.
+
+Because the C(n,2) pairs of one session share runs (each run appears in n-1 of them) they are
+NOT independent, so a t-interval over pairs understates the variance. Per-session intervals
+therefore come from a delete-one-RUN jackknife. Across sessions the instances ARE independent,
+so the session-mean keeps the paper's t-interval (Raj Eq. 3) with df = M-1 sessions.
+
 Levels of output:
-  1. Run x Run matrices  — per condition, every pair of repeated runs compared over the
-                           (trace, call-position) keys they share.
-  2. U-statistic theta   — off-diagonal pairwise kernel values ARE the U-statistic
-     + confidence interval  summands; reported per condition with a t-based CI.
-  3. Cross-condition MMD — when >=2 conditions are supplied, a two-sample trajectory test
-                           per condition pair (optional permutation p-value).
-  4. Per-trace pool      — the familiar analyze_consistency.py roll-up, retained for
-                           continuity, plus the H1 (TSS vs AC) check.
+  1. Per session          — for each session: theta per metric over its C(n,2) run pairs,
+     (the primary output)   a jackknife CI, an R x R run matrix, the H1 (TSS vs AC) check,
+                            and an event-count agreement check across runs.
+  2. Session mean         — sessions are equally weighted instances; the mean over sessions
+                            carries a t-CI with df = M-1. This is the only cross-session
+                            number, and it is a mean OF session thetas, never a pool of events.
+  3. Event-scope output U — per-event output consistency (instance = one identical input),
+                            retained as a separate, differently-scoped quantity.
+  4. Cross-condition MMD — when >=2 conditions are supplied, a two-sample test over SESSION
+                           trajectories per condition pair (optional permutation p-value).
 
 Usage:
   consistency_statistics.py --condition NAME=DIR [--condition NAME2=DIR2 ...] \
@@ -62,24 +83,29 @@ import json
 import math
 import os
 import random
+import re
 import statistics
 import sys
 from collections import Counter, defaultdict
 from itertools import combinations
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-# Per-pair metric primitives come from compare/ (the single source of truth); this module
-# owns only the pairwise aggregation (Run x Run matrices, U-statistic theta/CI, MMD). The
-# IO / grouping / judge helpers still live in analyze_consistency.py. Add our own dir to
-# sys.path so both imports resolve regardless of CWD.
+# Record reading and grouping come from replay_parsing; the per-pair metric primitives come
+# from compare/ (each the single source of truth for its half). This module owns only the
+# pairwise aggregation (Run x Run matrices, U-statistic theta/CI, MMD). The judge helper
+# still lives in analyze_consistency.py. Add our own dir to sys.path so all three imports
+# resolve regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import (  # noqa: E402
-    # Parsing: the single source of both the parse and the derived comparison units.
+from replay_parsing import (  # noqa: E402
     find_run_dirs,
     load_run,
     parse_response,
     event_key,
+    session_key,
     extract_tool_names,
+)
+from compare import (  # noqa: E402
+    # Canonical units the metrics are taken over.
     tool_kv_set,
     response_signature,
     # Metrics.
@@ -116,36 +142,136 @@ class Feature:
     content:    final natural-language text.
     signature:  content + canonical tool-args — the exact-match unit (None if not ok).
     names:      ordered tuple of tool NAMES in this turn (Yagubyan structural layer).
-    kv:         frozenset of (tool.key, canonical-value) — the AC unit (Def. 4).
+    kv:         frozenset of (tool.key, canonical-value) — the AC unit (Def. 4), unioned
+                over the turn's calls.
+    calls_kv:   per-CALL kv frozensets, index-aligned with `names`. The session-level,
+                step-aligned AC needs one set per call, not one per turn.
     hist:       action histogram over names — the JS-kernel unit.
+    start_time: wall-clock start; used only as a tiebreak when ordering a session's events.
     """
 
-    __slots__ = ("ok", "has_output", "content", "signature", "names", "kv", "hist")
+    __slots__ = ("ok", "has_output", "content", "signature", "names", "kv", "calls_kv",
+                 "hist", "start_time")
 
     def __init__(self, record: dict):
-        # Every derived field comes from compare/parsing.py, so this struct is a cache of
+        # Every derived field comes from replay_parsing.py / compare/signatures.py, so this
+        # struct is a cache of
         # the shared definitions rather than a second implementation of them.
         p = parse_response(record)
         self.ok = p["ok"]
         self.has_output = p["has_output"]
         self.content = p["content"]
-        self.names: Tuple[str, ...] = extract_tool_names(p["tool_calls"])
-        self.kv = tool_kv_set(p["tool_calls"])
+        calls = p["tool_calls"]
+        self.names: Tuple[str, ...] = extract_tool_names(calls)
+        self.kv = tool_kv_set(calls)
+        # One kv set per CALL, for step-aligned session AC. extract_tool_names drops unnamed
+        # calls, so filter identically here to keep calls_kv index-aligned with names.
+        self.calls_kv: Tuple[frozenset, ...] = tuple(
+            tool_kv_set([tc]) for tc in calls if extract_tool_names([tc])
+        )
         self.hist = action_histogram(self.names)
         # Whitespace-collapsed content + canonical tool args; None when not ok.
         self.signature: Optional[str] = response_signature(p)
+        self.start_time = p["start_time"]
 
 
 RunMap = Dict[str, Feature]  # event_id -> features
 
+# event_id is "<session_id>:event_{i:03d}_{call_id}" — the ordinal after the ':' is the call
+# position within the session, which is what puts a session's turns into replay order.
+_EVENT_ORDINAL_RE = re.compile(r"^event_(\d+)")
 
-def load_condition(base_dir: str) -> Dict[str, RunMap]:
-    """Load one condition: {run_id: {event_id: Feature}}.
+
+def event_ordinal(event_id: str) -> Optional[int]:
+    """Call position encoded in an event_id, or None when it carries no ordinal.
+
+    Only the part after the ':' is inspected, so a session_id that itself contains "event_"
+    cannot be mistaken for the ordinal.
+    """
+    tail = event_id.split(":", 1)[1] if ":" in event_id else event_id
+    m = _EVENT_ORDINAL_RE.match(tail)
+    return int(m.group(1)) if m else None
+
+
+class SessionRun:
+    """One session as replayed by ONE run: its events in order, plus its trajectory.
+
+    event_ids: the session's event_ids in replay order (by ordinal, start_time as tiebreak).
+    features:  event_id -> Feature.
+    steps:     ((tool_name, kv), ...) — every tool call of the session, concatenated across
+               its events in order. This is the step-aligned AC unit (Yagubyan Def. 4).
+    names:     the SESSION TRAJECTORY — the steps' names. This is what the ordering (GAK) and
+               composition (JS) kernels are meant to act on, and what TSS (Def. 3) compares.
+               Applying them per TURN is the bug this class exists to fix: with almost every
+               turn emitting 0 or 1 call, per-turn ordering/composition measure nothing.
+    """
+
+    __slots__ = ("session_id", "run_id", "event_ids", "features", "steps", "names", "hist",
+                 "n_ok")
+
+    def __init__(self, session_id: str, run_id: str, features: Dict[str, Feature]):
+        self.session_id = session_id
+        self.run_id = run_id
+        self.features = features
+
+        # Order by ordinal where present. Events without one sort last, by start_time, so a
+        # corpus predating event_ids still yields a deterministic order.
+        def order(eid: str) -> Tuple[int, int, float, str]:
+            ordinal = event_ordinal(eid)
+            if ordinal is not None:
+                return (0, ordinal, 0.0, eid)
+            st = features[eid].start_time
+            return (1, 0, st if st is not None else 0.0, eid)
+
+        self.event_ids: Tuple[str, ...] = tuple(sorted(features, key=order))
+
+        steps: List[Tuple[str, frozenset]] = []
+        for eid in self.event_ids:
+            f = features[eid]
+            if not f.ok:
+                continue  # an errored turn contributes no actions to the trajectory
+            for i, name in enumerate(f.names):
+                steps.append((name, f.calls_kv[i] if i < len(f.calls_kv) else frozenset()))
+        self.steps: Tuple[Tuple[str, frozenset], ...] = tuple(steps)
+        self.names: Tuple[str, ...] = tuple(n for n, _ in steps)
+        self.hist = action_histogram(self.names)
+        self.n_ok = sum(1 for eid in self.event_ids if features[eid].ok)
+
+    @property
+    def n_events(self) -> int:
+        return len(self.event_ids)
+
+
+SessionMap = Dict[str, Dict[str, SessionRun]]  # session_id -> {run_id: SessionRun}
+
+
+class Condition:
+    """One labelled condition, in both views the analysis needs.
+
+    runs:     {run_id: {event_id: Feature}} — the flat, event-scope view.
+    sessions: {session_id: {run_id: SessionRun}} — the session-scope view that every
+              paper-grounded quantity is computed over.
+    """
+
+    __slots__ = ("name", "base_dir", "runs", "sessions")
+
+    def __init__(self, name: str, base_dir: str, runs: Dict[str, RunMap], sessions: SessionMap):
+        self.name = name
+        self.base_dir = base_dir
+        self.runs = runs
+        self.sessions = sessions
+
+
+def load_condition(base_dir: str, name: str = "default") -> Condition:
+    """Load one condition from a dir of run_* subdirs, in both views.
 
     run_id is the run_* directory name. event_id is stable across runs for a given
-    (trace, call-position), so the same key in two runs was fed byte-identical input.
+    (session, call-position), so the same key in two runs was fed byte-identical input;
+    session_id groups a trace's events into the episode they belong to.
     """
     runs: Dict[str, RunMap] = {}
+    by_session: Dict[Tuple[str, str], Dict[str, Feature]] = defaultdict(dict)
+
     for rd in find_run_dirs(base_dir):
         run_id = os.path.basename(rd)
         rm: RunMap = {}
@@ -153,11 +279,19 @@ def load_condition(base_dir: str) -> Dict[str, RunMap]:
             key = event_key(rec)
             # A run should hit each identical input once; if a session re-issues the exact
             # same payload we keep the first (deterministic, order-stable).
-            if key not in rm:
-                rm[key] = Feature(rec)
+            if key in rm:
+                continue
+            feat = Feature(rec)
+            rm[key] = feat
+            by_session[(session_key(rec), run_id)][key] = feat
         if rm:
             runs[run_id] = rm
-    return runs
+
+    sessions: SessionMap = defaultdict(dict)
+    for (sid, run_id), feats in by_session.items():
+        if run_id in runs:
+            sessions[sid][run_id] = SessionRun(sid, run_id, feats)
+    return Condition(name, base_dir, runs, dict(sessions))
 
 
 # The kernels (js_divergence, action_histogram, js_kernel, global_alignment_kernel) and the
@@ -169,8 +303,15 @@ def load_condition(base_dir: str) -> Dict[str, RunMap]:
 # --------------------------------------------------------- run-vs-run comparison
 
 
-def compare_runs(run_a: RunMap, run_b: RunMap) -> Dict[str, Any]:
-    """Compare two repeated runs over the (trace, call-position) keys they share.
+def compare_runs(
+    run_a: RunMap, run_b: RunMap, keys: Optional[Iterable[str]] = None
+) -> Dict[str, Any]:
+    """Compare two repeated runs over the (session, call-position) keys they share.
+
+    `keys` restricts the comparison to a subset of event_ids — pass one session's events to
+    get that session's OUTPUT metrics. Omit it for the flat, all-events view. Restricting is
+    what makes the session-scope numbers reuse this exact channel-aware logic instead of a
+    second implementation of it.
 
     Returns per-metric means over the shared, usable keys plus the shared-key count.
 
@@ -191,7 +332,10 @@ def compare_runs(run_a: RunMap, run_b: RunMap) -> Dict[str, Any]:
     empty-vs-empty *content* sub-case would read as 1.0 — vacuous agreement masking a real
     behavioral difference. So such mixed pairs are forced to 0.0 on every similarity metric.
     """
-    shared = sorted(set(run_a) & set(run_b))
+    common = set(run_a) & set(run_b)
+    if keys is not None:
+        common &= set(keys)
+    shared = sorted(common)
     exact_hits = 0
     lev_vals: List[float] = []
     jac_vals: List[float] = []
@@ -258,46 +402,320 @@ def compare_runs(run_a: RunMap, run_b: RunMap) -> Dict[str, Any]:
     }
 
 
-def run_pair_matrix(runs: Dict[str, RunMap]) -> Dict[str, Any]:
-    """Build R x R symmetric matrices over all run pairs, for each metric."""
-    run_ids = sorted(runs.keys())
-    METRICS = [
-        "output_exact_match",
-        "output_levenshtein",
-        "output_jaccard",
-        "tss",
-        "ac",
-        "js_kernel",
-        "gak",
-    ]
-    # matrices[metric][i][j]
+# ------------------------------------------------------ session-scope comparison
+
+# The metrics reported at session scope. The tool-channel four (tss/ac/js_kernel/gak) are the
+# paper metrics and are computed on the SESSION trajectory; the output three are per-event
+# means within the session, via compare_runs.
+SESSION_METRICS = [
+    "output_exact_match",
+    "output_levenshtein",
+    "output_jaccard",
+    "tss",
+    "ac",
+    "js_kernel",
+    "gak",
+    "trajectory_exact_match",
+]
+
+
+def step_aligned_ac(
+    steps_a: Sequence[Tuple[str, frozenset]], steps_b: Sequence[Tuple[str, frozenset]]
+) -> Optional[float]:
+    """Argument Consistency (Yagubyan Def. 4) over two SESSION step sequences.
+
+    Steps are aligned by position in the session's action sequence (not by turn), which is
+    what Def. 4 specifies: per step, Jaccard over the flattened {(k,v)} argument sets, and 0
+    when the two traces call DIFFERENT tools at that step.
+
+    Folding rules, consistent with compare.argument_consistency's policy of record:
+      - different tools at a step        -> 0.0 (a real divergence)
+      - one trace has no step there      -> 0.0 (it stopped early / went longer: divergence)
+      - same tool, neither side has args -> excluded from the mean (0/0, nothing compared)
+    Returns None when no step was comparable at all.
+    """
+    n = max(len(steps_a), len(steps_b))
+    if n == 0:
+        return None
+    vals: List[float] = []
+    for i in range(n):
+        if i >= len(steps_a) or i >= len(steps_b):
+            vals.append(0.0)
+            continue
+        (name_a, kv_a), (name_b, kv_b) = steps_a[i], steps_b[i]
+        if name_a != name_b:
+            vals.append(0.0)
+            continue
+        v = argument_consistency(kv_a, kv_b)
+        if v is not None:
+            vals.append(v)
+    return statistics.mean(vals) if vals else None
+
+
+def session_pair(sa: SessionRun, sb: SessionRun) -> Dict[str, Any]:
+    """Compare two runs OF THE SAME SESSION — the kernel k(run_i, run_j | session).
+
+    Output channel: per-event means over the session's events, delegated to compare_runs
+    (identical channel-aware and has_output rules as before).
+
+    Tool channel: computed on the session TRAJECTORY, so the paper metrics measure what they
+    were defined to measure —
+      tss    Def. 3, edit distance over the session's tool-name sequence
+      ac     Def. 4, step-aligned argument Jaccard over the session's steps
+      js     composition of the session's action histogram
+      gak    ordering of the session's action sequence
+    The per-TURN values of the same four are retained under `turn_*` as diagnostics; they are
+    what the pre-fix code reported as tss/ac/js_kernel/gak.
+
+    The two channels treat a length mismatch differently, on purpose. Output metrics compare
+    the events the two runs SHARE (there is no counterpart to compare a missing turn against),
+    so a run that stopped after one turn can still score 1.0 on the turn it did produce. Tool
+    metrics compare the FULL trajectories, so the missing steps count as divergence. Read
+    together with n_events / n_steps that is the informative pair: "identical where both ran,
+    but one ran far less". A session whose runs disagree on event count is flagged in the
+    report for exactly this reason.
+    """
+    out = compare_runs(sa.features, sb.features)
+    # Per-turn tool metrics are diagnostics, not the paper quantities — move them aside so
+    # the session-scope values own the canonical names.
+    for k in ("tss", "ac", "js_kernel", "gak"):
+        out[f"turn_{k}"] = out.pop(k)
+
+    # Tool channel, gated on the channel being exercised at all. When NEITHER run called a
+    # tool in this whole session there is no trajectory to compare, so every tool metric is
+    # undefined (None) rather than 1.0 — the same channel-aware rule compare_runs applies per
+    # turn, and the same fold argument_consistency's policy of record fixes for AGGREGATION
+    # surfaces. Scoring a tool-free session as tss=1.0 would be agreement-by-emptiness, and
+    # since most sessions here never call a tool it would dominate the mean: it put session
+    # mean TSS at 0.988 over 10 sessions while AC was defined for only 4, so H1 was comparing
+    # two different populations.
+    if sa.names or sb.names:
+        out["tss"] = tss(sa.names, sb.names)
+        out["js_kernel"] = js_kernel(sa.hist, sb.hist)
+        out["gak"] = global_alignment_kernel(sa.names, sb.names)
+        out["trajectory_exact_match"] = 1.0 if sa.names == sb.names else 0.0
+    else:
+        out["tss"] = out["js_kernel"] = out["gak"] = out["trajectory_exact_match"] = None
+    out["ac"] = step_aligned_ac(sa.steps, sb.steps)
+    out["n_steps"] = [len(sa.steps), len(sb.steps)]
+    out["n_events"] = [sa.n_events, sb.n_events]
+    return out
+
+
+def _jackknife_ci(
+    pair_vals: Dict[Tuple[str, str], Optional[float]], run_ids: Sequence[str], alpha: float
+) -> Dict[str, Any]:
+    """theta over a session's run pairs, with a delete-one-RUN jackknife CI.
+
+    theta = C(n,2)^-1 * sum_{i<j} k(run_i, run_j) (Raj Eq. 1) — but the C(n,2) summands are
+    DEPENDENT: each run appears in n-1 of them. A t-interval over pairs would treat 45 pairs
+    as 45 independent observations and understate the variance badly. The jackknife resamples
+    the actual independent units — the n runs:
+
+        theta_(-r) = mean of the pairs not involving run r
+        var_jack   = (n-1)/n * sum_r (theta_(-r) - mean_r theta_(-r))^2
+        CI         = theta +/- t_{n-1,1-alpha/2} * sqrt(var_jack)
+
+    Needs n >= 3: with 2 runs there is a single pair and deleting either leaves nothing.
+    """
+    defined = {p: v for p, v in pair_vals.items() if v is not None}
+    n = len(run_ids)
+    if not defined:
+        return {"theta": None, "n_pairs": 0, "n_runs": n, "ci_low": None, "ci_high": None,
+                "note": "no comparable run pairs"}
+    theta = statistics.mean(defined.values())
+    base = {"theta": theta, "n_pairs": len(defined), "n_runs": n}
+    if n < 3:
+        return {**base, "ci_low": None, "ci_high": None,
+                "note": f"n_runs={n}; jackknife needs >=3"}
+
+    loo: List[float] = []
+    for r in run_ids:
+        kept = [v for (a, b), v in defined.items() if r not in (a, b)]
+        if kept:
+            loo.append(statistics.mean(kept))
+    if len(loo) < 2:
+        return {**base, "ci_low": None, "ci_high": None,
+                "note": "too few leave-one-out replicates"}
+    mean_loo = statistics.mean(loo)
+    var = (len(loo) - 1) / len(loo) * sum((x - mean_loo) ** 2 for x in loo)
+    se = math.sqrt(var)
+    tc = t_critical(len(loo) - 1, alpha)
+    half = tc * se
+    return {**base, "stdev_jack": se, "std_error": se, "alpha": alpha, "t_crit": tc,
+            "ci_method": "jackknife-over-runs",
+            "ci_low": max(0.0, theta - half), "ci_high": min(1.0, theta + half)}
+
+
+def session_analysis(
+    session_id: str, by_run: Dict[str, SessionRun], alpha: float
+) -> Dict[str, Any]:
+    """Everything reported for ONE session: theta + jackknife CI per metric, R x R matrices,
+    the H1 check, and an event-count agreement check across the session's runs."""
+    run_ids = sorted(by_run)
+    n = len(run_ids)
+    event_counts = {r: by_run[r].n_events for r in run_ids}
+    step_counts = {r: len(by_run[r].steps) for r in run_ids}
+    modal_events = Counter(event_counts.values()).most_common(1)[0] if event_counts else (0, 0)
+
+    base: Dict[str, Any] = {
+        "session_id": session_id,
+        "n_runs": n,
+        "run_ids": run_ids,
+        "n_events": event_counts,
+        "n_steps": step_counts,
+        # Did every run of this session replay the same number of turns? A run that dropped
+        # turns is not comparable on equal footing, and silently averaging it in would hide
+        # exactly the failure the experiment is meant to surface.
+        "event_count_agreement": (
+            modal_events[1] / n if n else None
+        ),
+        "modal_event_count": modal_events[0],
+    }
+    if n < 2:
+        return {**base, "note": "single run; nothing to compare", "metrics": {}, "matrices": {},
+                "pairs": {}, "h1": None}
+
+    pair_records: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for ra, rb in combinations(run_ids, 2):
+        pair_records[(ra, rb)] = session_pair(by_run[ra], by_run[rb])
+
+    idx = {r: i for i, r in enumerate(run_ids)}
     matrices: Dict[str, List[List[Optional[float]]]] = {
-        m: [[None] * len(run_ids) for _ in run_ids] for m in METRICS
+        m: [[None] * n for _ in range(n)] for m in SESSION_METRICS
+    }
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for m in SESSION_METRICS:
+        vals = {p: rec[m] for p, rec in pair_records.items()}
+        metrics[m] = _jackknife_ci(vals, run_ids, alpha)
+        for (ra, rb), v in vals.items():
+            matrices[m][idx[ra]][idx[rb]] = v
+            matrices[m][idx[rb]][idx[ra]] = v
+    for m in SESSION_METRICS:  # a run vs itself is perfectly consistent by construction
+        for i in range(n):
+            matrices[m][i][i] = 1.0
+
+    tss_theta = metrics["tss"]["theta"]
+    ac_theta = metrics["ac"]["theta"]
+    gap = (tss_theta - ac_theta) if (tss_theta is not None and ac_theta is not None) else None
+    return {
+        **base,
+        "metrics": metrics,
+        "matrices": matrices,
+        "pairs": {f"{a}|{b}": v for (a, b), v in pair_records.items()},
+        # supports_h1 is None, not False, when the gap is undefined (a session that called no
+        # tools, or called them without arguments). "H1 untestable here" is not "H1 refuted".
+        "h1": {"mean_tss": tss_theta, "mean_ac": ac_theta, "gap": gap,
+               "supports_h1": None if gap is None else gap > 0},
+    }
+
+
+def per_session_analysis(cond: Condition, alpha: float) -> Dict[str, Any]:
+    """Session-scope analysis for a whole condition: one entry per session, plus the
+    equally-weighted session mean with a t-CI across sessions (Raj Eq. 3).
+
+    Sessions ARE independent instances, so the cross-session interval keeps the paper's
+    t-form with df = M-1. Only sessions with >=2 runs contribute.
+    """
+    per_session = {
+        sid: session_analysis(sid, by_run, alpha)
+        for sid, by_run in sorted(cond.sessions.items())
+    }
+    usable = [s for s in per_session.values() if s.get("metrics")]
+
+    summary: Dict[str, Any] = {}
+    for m in SESSION_METRICS:
+        thetas = [s["metrics"][m]["theta"] for s in usable
+                  if s["metrics"].get(m, {}).get("theta") is not None]
+        summary[m] = {
+            **_aggregate_u(thetas, alpha),
+            "scope": "session_mean",
+            "note_scope": "mean of per-session thetas, each session weighted equally",
+        }
+
+    # Only sessions where the gap is DEFINED are in the H1 denominator: a tool-free session
+    # cannot support or refute "structure is more stable than arguments".
+    h1s = [s["h1"] for s in usable if s.get("h1") and s["h1"]["gap"] is not None]
+    supporting = [h for h in h1s if h["supports_h1"]]
+    gaps = [h["gap"] for h in h1s]
+    return {
+        "n_sessions": len(per_session),
+        "n_sessions_compared": len(usable),
+        "sessions": per_session,
+        "session_mean": summary,
+        "h1_by_session": {
+            "n_sessions": len(h1s),
+            "n_testable": len(h1s),
+            "n_untestable": len(usable) - len(h1s),
+            "n_supporting": len(supporting),
+            "mean_gap": statistics.mean(gaps) if gaps else None,
+        },
+        "event_count_agreement": {
+            sid: s["event_count_agreement"] for sid, s in per_session.items()
+        },
+    }
+
+
+def run_pair_matrix(per_session: Dict[str, Dict[str, Any]], run_ids: Sequence[str]) -> Dict[str, Any]:
+    """R x R symmetric matrices per metric, each cell the SESSION MEAN for that run pair.
+
+    cell[i][j] = mean over sessions of k(run_i, run_j | session), sessions weighted equally.
+    The pre-fix version pooled every event of every session into one mean per run pair, which
+    weighted a 15-event session ~7x a 2-event one and compared turns belonging to different
+    tasks. Values are read back out of the already-computed per-session pair records rather
+    than recomputed, so this view and the per-session table can never disagree.
+    """
+    run_ids = list(run_ids)
+    idx = {r: i for i, r in enumerate(run_ids)}
+    n = len(run_ids)
+    # (run_a, run_b) -> metric -> per-session values
+    collected: Dict[Tuple[str, str], Dict[str, List[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    n_sessions_per_pair: Counter = Counter()
+
+    for sess in per_session.values():
+        for pair_key, rec in (sess.get("pairs") or {}).items():
+            # run_ids are run_* directory names, so '|' can only be the separator.
+            ra, rb = pair_key.split("|", 1)
+            if ra not in idx or rb not in idx:
+                continue
+            n_sessions_per_pair[(ra, rb)] += 1
+            for m in SESSION_METRICS:
+                v = rec.get(m)
+                if v is not None:
+                    collected[(ra, rb)][m].append(v)
+
+    matrices: Dict[str, List[List[Optional[float]]]] = {
+        m: [[None] * n for _ in range(n)] for m in SESSION_METRICS
     }
     pair_records: Dict[Tuple[str, str], Dict[str, Any]] = {}
-
-    for (i, ri), (j, rj) in combinations(enumerate(run_ids), 2):
-        cmp = compare_runs(runs[ri], runs[rj])
-        pair_records[(ri, rj)] = cmp
-        for m in METRICS:
-            v = cmp[m]
-            matrices[m][i][j] = v
-            matrices[m][j][i] = v
-    for m in METRICS:  # diagonal: a run vs itself is perfectly consistent for every metric
-        for i in range(len(run_ids)):
+    for (ra, rb), by_metric in collected.items():
+        rec: Dict[str, Any] = {"n_sessions": n_sessions_per_pair[(ra, rb)]}
+        for m in SESSION_METRICS:
+            vals = by_metric.get(m) or []
+            v = statistics.mean(vals) if vals else None
+            rec[m] = v
+            rec[f"n_sessions_{m}"] = len(vals)
+            matrices[m][idx[ra]][idx[rb]] = v
+            matrices[m][idx[rb]][idx[ra]] = v
+        pair_records[(ra, rb)] = rec
+    for m in SESSION_METRICS:  # a run vs itself is perfectly consistent for every metric
+        for i in range(n):
             matrices[m][i][i] = 1.0
 
     # Per-run "distance to pack": 1 - mean similarity to the other runs (higher = more of
     # an outlier). Uses output_levenshtein as the summary similarity.
     outlier: Dict[str, float] = {}
     for i, ri in enumerate(run_ids):
-        sims = [matrices["output_levenshtein"][i][j] for j in range(len(run_ids)) if j != i]
+        sims = [matrices["output_levenshtein"][i][j] for j in range(n) if j != i]
         sims = [s for s in sims if s is not None]
         outlier[ri] = (1.0 - statistics.mean(sims)) if sims else 0.0
 
     return {
+        "scope": "session_mean_per_run_pair",
         "run_ids": run_ids,
-        "metrics": METRICS,
+        "metrics": SESSION_METRICS,
         "matrices": matrices,
         "pairs": {f"{a}|{b}": v for (a, b), v in pair_records.items()},
         "outlier_score": outlier,
@@ -398,12 +816,19 @@ def u_statistic(
     alpha: float,
     judge_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Consistency U-statistic theta with a t-based CI across instances (Raj et al.).
+    """EVENT-SCOPE consistency U-statistic theta with a t-based CI (Raj et al.).
 
-    Each INSTANCE is a (trace, call-position) key. For that key we take the outputs from
-    every run and form U_n = C(n,2)^-1 * sum_{i<j} k(y_i, y_j) — the mean pairwise kernel.
-    Then across the M instances we report the mean Ubar, sample stdev, and the t-CI
+    Each INSTANCE is one event_id — one identical input. For that input we take the outputs
+    from every run and form U_n = C(n,2)^-1 * sum_{i<j} k(y_i, y_j) — the mean pairwise
+    kernel. Then across the M instances we report the mean Ubar, sample stdev, and the t-CI
     Ubar +/- t_{M-1,1-alpha/2} * sigma_hat / sqrt(M).
+
+    This is a legitimate quantity — "given the same prompt, how repeatable is one turn?" —
+    but it is NOT the session-level consistency the papers' hypotheses are about, and its M
+    instances are not independent (the events of one session share a task and a prefix). It
+    is kept as a separate, explicitly event-scoped number; `session_u_statistic` is the
+    headline one. It is also where the LLM-judge clustering lives, since the judge clusters
+    the repeated outputs of a single identical input.
     """
     # Gather, per instance key, the list of usable Features across runs.
     per_key: Dict[Tuple[str, str], List["Feature"]] = defaultdict(list)
@@ -443,33 +868,75 @@ def u_statistic(
             "max_clusters": max(judge_clusters),
         }
 
-    m = len(instance_u)
-    if m == 0:
-        return {"kernel": kind, "n_instances": 0, "theta": None,
-                "note": "no comparable instances", "judge": judge_summary}
-    theta = statistics.mean(instance_u)
-    if m == 1:
-        return {
-            "kernel": kind, "n_instances": 1, "theta": theta,
-            "ci_low": None, "ci_high": None, "note": "single instance; CI undefined",
-            "judge": judge_summary,
-        }
-    sd = statistics.stdev(instance_u)  # sample stdev (M-1 denominator)
-    se = sd / math.sqrt(m)
-    tc = t_critical(m - 1, alpha)
-    half = tc * se
     return {
         "kernel": kind,
-        "n_instances": m,
-        "theta": theta,
-        "stdev": sd,
-        "std_error": se,
-        "alpha": alpha,
-        "t_crit": tc,
-        "ci_low": max(0.0, theta - half),
-        "ci_high": min(1.0, theta + half),
+        "scope": "event",
+        "instance": "event_id (one identical input)",
+        **_aggregate_u(instance_u, alpha),
         "judge": judge_summary,
     }
+
+
+def session_output_kernel(sa: SessionRun, sb: SessionRun, kind: str) -> Optional[float]:
+    """Output kernel for a run PAIR of one session: mean output_kernel over its events.
+
+    The session is the instance and the run is the sample unit, so the kernel has to reduce
+    a whole session to one number in [0,1]. It is the mean of the per-event kernel over the
+    events the two runs share — inapplicable events (errored, or no prose for the content
+    kernel) drop out rather than padding it, exactly as in compare_runs. None when the pair
+    shares no applicable event.
+    """
+    vals: List[float] = []
+    for key in sorted(set(sa.features) & set(sb.features)):
+        v = output_kernel(sa.features[key], sb.features[key], kind)
+        if v is not None:
+            vals.append(v)
+    return statistics.mean(vals) if vals else None
+
+
+def session_u_statistic(
+    cond: Condition, kind: str, alpha: float
+) -> Dict[str, Any]:
+    """SESSION-SCOPE consistency U-statistic — the headline theta (Raj et al., Eq. 1/3).
+
+    INSTANCE = session, SAMPLE UNIT = run:
+        theta_m = C(n,2)^-1 * sum_{i<j} k(run_i, run_j | session m)      (Eq. 1)
+        theta   = mean_m theta_m,  CI = theta +/- t_{M-1,1-a/2} * s/sqrt(M)   (Eq. 3)
+    with M = number of sessions. Per-session intervals use the delete-one-run jackknife (the
+    C(n,2) pairs share runs and are not independent); the cross-session interval keeps the
+    paper's t-form because sessions ARE independent instances.
+
+    The judge kernel is not available here — it clusters the repeated outputs of ONE identical
+    input, which is an event-scope question. kind='judge' therefore scores with 'exact' and
+    the cluster counts are reported by u_statistic (event scope).
+    """
+    effective_kind = "exact" if kind == "judge" else kind
+    per_session: Dict[str, Dict[str, Any]] = {}
+    thetas: List[float] = []
+    for sid, by_run in sorted(cond.sessions.items()):
+        run_ids = sorted(by_run)
+        if len(run_ids) < 2:
+            continue
+        vals = {
+            (ra, rb): session_output_kernel(by_run[ra], by_run[rb], effective_kind)
+            for ra, rb in combinations(run_ids, 2)
+        }
+        est = _jackknife_ci(vals, run_ids, alpha)
+        per_session[sid] = est
+        if est["theta"] is not None:
+            thetas.append(est["theta"])
+
+    out: Dict[str, Any] = {
+        "kernel": kind,
+        "effective_kernel": effective_kind,
+        "scope": "session",
+        "instance": "session (sample unit = run)",
+        **_aggregate_u(thetas, alpha),
+        "per_session": per_session,
+    }
+    if kind == "judge":
+        out["judge_note"] = "judge clusters are event-scope; see event_u_statistic.judge"
+    return out
 
 
 def _aggregate_u(instance_u: List[float], alpha: float) -> Dict[str, Any]:
@@ -496,59 +963,55 @@ def _aggregate_u(instance_u: List[float], alpha: float) -> Dict[str, Any]:
     }
 
 
-def trajectory_u_statistic(runs: Dict[str, RunMap], alpha: float) -> Dict[str, Any]:
+def trajectory_u_statistic(
+    per_session: Dict[str, Dict[str, Any]], alpha: float
+) -> Dict[str, Any]:
     """Trajectory-level consistency U-statistic theta with a t-CI (Raj et al., Eq. 1/3).
 
-    Same all-pairs construction as `u_statistic`, but the kernel acts on the tool-call
-    *trajectory* of each repetition rather than its text output. Under Assumption 1
-    (x_mi = x_m0) the N repetitions of one instance are a valid sample, so no base-vs-
-    perturbed split is needed:
+    Same instance/sample structure as `session_u_statistic` — instance = session, sample
+    unit = run — but the kernel acts on the session's tool-call TRAJECTORY rather than its
+    text output. Under Assumption 1 (x_mi = x_m0) the n repetitions of one session are a
+    valid sample, so no base-vs-perturbed split is needed:
 
-        U_n = C(n,2)^-1 * sum_{i<j} k(tau_i, tau_j)   per instance (Eq. 1)
-        theta = mean_m U_n                            across M instances (Eq. 3)
+        theta_m = C(n,2)^-1 * sum_{i<j} k(tau_i, tau_j)   per session (Eq. 1)
+        theta   = mean_m theta_m                          across M sessions (Eq. 3)
 
     Two kernels, both normalized to [0,1] with k(tau,tau)=1:
       - js:  Jensen-Shannon kernel over action histograms  -> action *composition*
       - gak: Global Alignment Kernel over name sequences    -> action *ordering*
+
+    tau is the SESSION trajectory (SessionRun.names). Applying these kernels to one turn's
+    tool list — the pre-fix behavior — left them nothing to measure: a turn emits 0 or 1
+    call, so "composition" was a single bin and "ordering" a single element, and both
+    collapsed to "same tool name or not". Values are read from the per-session table
+    (js_kernel / gak) instead of recomputed, so the two views cannot disagree.
     """
-    per_key: Dict[Tuple[str, str], List["Feature"]] = defaultdict(list)
-    for rm in runs.values():
-        for key, feat in rm.items():
-            if feat.ok:
-                per_key[key].append(feat)
-
-    js_u: List[float] = []
-    gak_u: List[float] = []
-    for feats in per_key.values():
-        if len(feats) < 2:
-            continue
-        js_vals: List[float] = []
-        gak_vals: List[float] = []
-        for a, b in combinations(feats, 2):
-            js_vals.append(js_kernel(a.hist, b.hist))
-            gak_vals.append(global_alignment_kernel(a.names, b.names))
-        if js_vals:
-            js_u.append(statistics.mean(js_vals))
-        if gak_vals:
-            gak_u.append(statistics.mean(gak_vals))
-
-    return {
-        "js": {"kernel": "js", **_aggregate_u(js_u, alpha)},
-        "gak": {"kernel": "gak", **_aggregate_u(gak_u, alpha)},
-    }
+    out: Dict[str, Any] = {}
+    for kind, metric, layer in (("js", "js_kernel", "composition"), ("gak", "gak", "ordering")):
+        est = {sid: s["metrics"][metric] for sid, s in per_session.items() if s.get("metrics")}
+        thetas = [e["theta"] for e in est.values() if e.get("theta") is not None]
+        out[kind] = {
+            "kernel": kind,
+            "layer": layer,
+            "scope": "session",
+            "instance": "session (sample unit = run)",
+            **_aggregate_u(thetas, alpha),
+            "per_session": est,
+        }
+    return out
 
 
 # --------------------------------------------------------------- cross-condition MMD
 
 
-def condition_trajectories(runs: Dict[str, RunMap], key: str) -> List[Tuple[str, ...]]:
-    """All runs' tool-name sequences for one event_id (call-position) key in a condition."""
-    seqs = []
-    for rm in runs.values():
-        feat = rm.get(key)
-        if feat is not None and feat.ok:
-            seqs.append(feat.names)
-    return seqs
+def condition_trajectories(cond: Condition, session_id: str) -> List[Tuple[str, ...]]:
+    """Every run's SESSION trajectory for one session in a condition.
+
+    One trajectory per run — the session's whole action sequence, not one turn's tool list.
+    That is the object the MMD kernels are defined over: the two-sample question is "do the
+    two conditions produce the same DISTRIBUTION of trajectories for this task?".
+    """
+    return [sr.names for sr in cond.sessions.get(session_id, {}).values()]
 
 
 def _mmd2_unbiased(
@@ -585,43 +1048,54 @@ def _kernel_js(a: Tuple[str, ...], b: Tuple[str, ...]) -> float:
 
 
 def cross_condition_mmd(
-    conditions: Dict[str, Dict[str, RunMap]],
+    conditions: Dict[str, Condition],
     perm: int,
     seed: int,
 ) -> List[Dict[str, Any]]:
-    """For each condition pair, aggregate per-instance unbiased MMD^2 over shared keys,
-    under both the JS (composition) and GAK (ordering) kernels, with an optional
-    permutation p-value."""
+    """For each condition pair, aggregate per-SESSION unbiased MMD^2 over the sessions both
+    conditions replayed, under both the JS (composition) and GAK (ordering) kernels, with an
+    optional permutation p-value.
+
+    The instance is a session: within it, condition A contributes its runs' trajectories and
+    condition B contributes its own, and MMD^2 asks whether those two samples of trajectories
+    came from the same distribution. Averaging over sessions weights each task equally.
+    """
     names = sorted(conditions.keys())
     rng = random.Random(seed)
     results: List[Dict[str, Any]] = []
 
     for na, nb in combinations(names, 2):
         ca, cb = conditions[na], conditions[nb]
-        # Instances = keys present (with >=2 usable trajectories) in BOTH conditions.
-        keys_a = {k for rm in ca.values() for k in rm}
-        keys_b = {k for rm in cb.values() for k in rm}
-        shared_keys = sorted(keys_a & keys_b)
+        # Instances = sessions present (with >=2 usable trajectories) in BOTH conditions.
+        shared_sessions = sorted(set(ca.sessions) & set(cb.sessions))
 
         for kname, kfn in (("js", _kernel_js), ("gak", global_alignment_kernel)):
             per_instance: List[Tuple[List, List, float]] = []
-            for key in shared_keys:
-                xs = condition_trajectories(ca, key)
-                ys = condition_trajectories(cb, key)
+            for sid in shared_sessions:
+                xs = condition_trajectories(ca, sid)
+                ys = condition_trajectories(cb, sid)
                 v = _mmd2_unbiased(xs, ys, kfn)
                 if v is not None:
                     per_instance.append((xs, ys, v))
             if not per_instance:
                 results.append({
                     "condition_a": na, "condition_b": nb, "kernel": kname,
-                    "mmd2": None, "note": "no shared instances with >=2 trajectories each",
+                    "mmd2": None, "note": "no shared sessions with >=2 trajectories each",
                 })
                 continue
 
             mmd2 = statistics.mean(v for _, _, v in per_instance)
+            # Sessions where NEITHER condition called a tool contribute an exact 0 (the two
+            # samples are genuinely identical), which is correct but dilutes the mean toward
+            # "indistinguishable". Report how many instances were trivial in that way so the
+            # number is read against the right denominator.
+            trivial = sum(
+                1 for xs, ys, _v in per_instance if not any(xs) and not any(ys)
+            )
             entry = {
                 "condition_a": na, "condition_b": nb, "kernel": kname,
-                "n_instances": len(per_instance), "mmd2": mmd2,
+                "instance": "session", "n_instances": len(per_instance),
+                "n_trivial": trivial, "mmd2": mmd2,
             }
             if perm > 0:
                 ge = 0
@@ -645,21 +1119,34 @@ def cross_condition_mmd(
 # ------------------------------------------------------------- H1 (TSS vs AC)
 
 
-def h1_check(matrix: Dict[str, Any]) -> Dict[str, Any]:
-    """Yagubyan Hypothesis 1: E[TSS] >> E[AC]. Average the off-diagonal run-pair values."""
-    def off_diag_mean(metric: str) -> Optional[float]:
-        vals = [v for v in matrix["pairs"].values() if v.get(metric) is not None]
-        xs = [v[metric] for v in vals]
-        return statistics.mean(xs) if xs else None
+def h1_check(session_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Yagubyan Hypothesis 1: E[TSS] >> E[AC], at session scope.
 
-    tss = off_diag_mean("tss")
-    ac = off_diag_mean("ac")
-    gap = (tss - ac) if (tss is not None and ac is not None) else None
+    Both expectations are means of per-SESSION thetas (each session weighted equally), so the
+    comparison is between two quantities computed over the same trajectories. The pre-fix
+    version averaged per-TURN values pooled across sessions, where TSS reduced to "same tool
+    name?" and the gap mostly reflected that degeneracy rather than the hypothesis.
+
+    `n_supporting` reports how many individual sessions show the gap, which is the more
+    informative claim: H1 supported on 9 of 10 sessions says more than one pooled mean.
+    """
+    mean_tss = session_result["session_mean"]["tss"].get("theta")
+    mean_ac = session_result["session_mean"]["ac"].get("theta")
+    gap = (mean_tss - mean_ac) if (mean_tss is not None and mean_ac is not None) else None
+    by_session = session_result.get("h1_by_session") or {}
     return {
-        "mean_tss": tss,
-        "mean_ac": ac,
+        "scope": "session_mean",
+        "mean_tss": mean_tss,
+        "mean_ac": mean_ac,
         "gap": gap,
         "supports_h1": (gap is not None and gap > 0),
+        "n_sessions": by_session.get("n_sessions"),
+        "n_supporting": by_session.get("n_supporting"),
+        "mean_session_gap": by_session.get("mean_gap"),
+        "per_session": {
+            sid: s["h1"] for sid, s in (session_result.get("sessions") or {}).items()
+            if s.get("h1")
+        },
     }
 
 
@@ -670,66 +1157,111 @@ def _fmt(v: Optional[float]) -> str:
     return "n/a" if v is None else f"{v:.3f}"
 
 
+def _fmt_theta(est: Dict[str, Any]) -> str:
+    """theta with its interval, or the reason there isn't one."""
+    if est.get("theta") is None:
+        return f"n/a — {est.get('note', 'no data')}"
+    if est.get("ci_low") is None:
+        return f"{est['theta']:.3f}  ({est.get('note', 'CI undefined')})"
+    return f"{est['theta']:.3f}  [{est['ci_low']:.3f}, {est['ci_high']:.3f}]"
+
+
+# Columns of the per-session table: the paper metrics first, then output agreement.
+_TABLE_METRICS = [("tss", "TSS"), ("ac", "AC"), ("js_kernel", "JS"), ("gak", "GAK"),
+                  ("output_exact_match", "exact"), ("output_levenshtein", "lev")]
+
+
 def print_report(analysis: Dict[str, Any]) -> None:
     print("\n" + "=" * 74)
-    print("PAPER-GROUNDED AGENT CONSISTENCY")
+    print("PAPER-GROUNDED AGENT CONSISTENCY  (session-scope)")
     print("=" * 74)
 
     for name, cond in analysis["conditions"].items():
         mat = cond["run_pair_matrix"]
         rids = mat["run_ids"]
-        print(f"\nCondition: {name}   ({len(rids)} runs: {', '.join(rids)})")
+        sess = cond["per_session"]
+        print(
+            f"\nCondition: {name}   ({len(rids)} runs x {sess['n_sessions']} sessions; "
+            f"{sess['n_sessions_compared']} comparable)"
+        )
         print("-" * 74)
 
-        # U-statistic
+        # Headline: the session-scope U-statistic. Instance = session, sample unit = run.
         u = cond["u_statistic"]
-        if u.get("theta") is None:
-            print(f"  U-statistic theta ({u['kernel']}): n/a — {u.get('note','')}")
-        elif u.get("ci_low") is None:
-            print(f"  U-statistic theta ({u['kernel']}): {u['theta']:.3f}  ({u.get('note','')})")
-        else:
-            print(
-                f"  U-statistic theta ({u['kernel']}): {u['theta']:.3f}  "
-                f"[{u['ci_low']:.3f}, {u['ci_high']:.3f}]  "
-                f"(M={u['n_instances']} instances, {int((1-u['alpha'])*100)}% CI)"
-            )
+        alpha_pct = int((1 - (u.get("alpha") or 0.05)) * 100)
+        print(f"  Session U-statistic theta ({u['kernel']}): {_fmt_theta(u)}"
+              f"   (M={u.get('n_instances')} sessions, {alpha_pct}% CI)")
 
-        # Trajectory U-statistic (same Eq. 1/3 all-pairs construction, tool-call kernels)
-        traj = cond.get("trajectory_u_statistic")
-        if traj:
-            for kind, label in (("js", "composition"), ("gak", "ordering")):
-                t = traj.get(kind, {})
-                if t.get("theta") is None:
-                    print(f"  Trajectory theta [{kind}/{label}]: n/a — {t.get('note','')}")
-                elif t.get("ci_low") is None:
-                    print(f"  Trajectory theta [{kind}/{label}]: {t['theta']:.3f}  ({t.get('note','')})")
-                else:
-                    print(
-                        f"  Trajectory theta [{kind}/{label}]: {t['theta']:.3f}  "
-                        f"[{t['ci_low']:.3f}, {t['ci_high']:.3f}]  (M={t['n_instances']} instances)"
-                    )
+        traj = cond.get("trajectory_u_statistic") or {}
+        for kind, label in (("js", "composition"), ("gak", "ordering")):
+            t = traj.get(kind)
+            if t:
+                print(f"  Trajectory theta [{kind}/{label}]: {_fmt_theta(t)}"
+                      f"   (M={t.get('n_instances')} sessions)")
 
-        # H1
         h = cond["h1"]
         arrow = ">>" if h["supports_h1"] else "<= "
+        verdict = "supports H1" if h["supports_h1"] else "does NOT support H1"
+        support = ""
+        if h.get("n_sessions"):
+            support = f"; {h['n_supporting']}/{h['n_sessions']} sessions individually"
         print(
             f"  Hypothesis 1 (E[TSS] {arrow} E[AC]):  "
             f"TSS={_fmt(h['mean_tss'])}  AC={_fmt(h['mean_ac'])}  "
-            f"gap={_fmt(h['gap'])}  -> {'supports H1' if h['supports_h1'] else 'does NOT support H1'}"
+            f"gap={_fmt(h['gap'])}  -> {verdict}{support}"
         )
 
-        # Aggregate off-diagonal means per metric
-        print("  Mean over all run pairs:")
-        for m in mat["metrics"]:
-            vals = [v[m] for v in mat["pairs"].values() if v.get(m) is not None]
-            if vals:
-                print(f"    {m:22} {statistics.mean(vals):.3f}   (min pair {min(vals):.3f})")
+        # Per-session table — the primary output. theta per metric over that session's run
+        # pairs; a session whose runs disagreed on event COUNT is flagged, because averaging
+        # it in on equal footing would hide a dropped-turn failure.
+        rows = [(sid, s) for sid, s in sess["sessions"].items() if s.get("metrics")]
+        if rows:
+            header = f"  {'session':<30}{'runs':>5}{'evts':>10}" + "".join(
+                f"{lbl:>8}" for _, lbl in _TABLE_METRICS
+            )
+            print("\n" + header)
+            print("  " + "-" * (len(header) - 2))
+            for sid, s in rows:
+                counts = list(s["n_events"].values())
+                # When the runs agree, one number says it all. When they don't, the RANGE is
+                # the finding — a session whose runs replayed 1 to 30 events did not diverge
+                # slightly, it fell apart, and the modal count alone would hide that.
+                if (s["event_count_agreement"] or 0) >= 1.0:
+                    evts = str(s["modal_event_count"])
+                else:
+                    evts = f"{min(counts)}-{max(counts)}*"
+                cells = "".join(
+                    f"{_fmt(s['metrics'][m].get('theta')):>8}" for m, _ in _TABLE_METRICS
+                )
+                label = sid if len(sid) <= 29 else sid[:28] + "~"
+                print(f"  {label:<30}{s['n_runs']:>5}{evts:>10}{cells}")
+            if any((s["event_count_agreement"] or 0) < 1.0 for _, s in rows):
+                print("  * runs of this session replayed different numbers of events "
+                      "(range shown); metrics below are over the events they share")
+            print("  (theta per session over its C(n,2) run pairs; "
+                  "CIs are in the JSON, jackknifed over runs)")
+
+        # Session mean per metric — the one cross-session number, with a t-CI (df = M-1).
+        print("\n  Session mean (equal weight per session, t-CI over sessions):")
+        for m, est in sess["session_mean"].items():
+            if est.get("theta") is not None:
+                print(f"    {m:24}{_fmt_theta(est)}   (M={est['n_instances']})")
+
+        # Event-scope U — kept, but explicitly a different question.
+        ev = cond.get("event_u_statistic")
+        if ev:
+            print(f"\n  Event-scope output U ({ev['kernel']}, one identical input = one "
+                  f"instance): {_fmt_theta(ev)}   (M={ev.get('n_instances')} events)")
+            if ev.get("judge"):
+                j = ev["judge"]
+                print(f"    judge: {j['n_judged']} groups judged, "
+                      f"mean {j['mean_clusters']:.2f} clusters (max {j['max_clusters']})")
 
         # Outliers
         outl = sorted(mat["outlier_score"].items(), key=lambda kv: -kv[1])
         worst = outl[0] if outl else None
         if worst and worst[1] > 0:
-            print(f"  Most outlying run: {worst[0]} (distance-to-pack {worst[1]:.3f})")
+            print(f"\n  Most outlying run: {worst[0]} (distance-to-pack {worst[1]:.3f})")
 
     # Cross-condition MMD
     mmd = analysis.get("mmd")
@@ -744,7 +1276,10 @@ def print_report(analysis: Dict[str, Any]) -> None:
             if e.get("mmd2") is None:
                 print(f"{base} n/a — {e.get('note','')}")
                 continue
-            line = f"{base} MMD^2={e['mmd2']:+.4f}  (n={e['n_instances']})"
+            line = f"{base} MMD^2={e['mmd2']:+.4f}  (n={e['n_instances']} sessions"
+            if e.get("n_trivial"):
+                line += f", {e['n_trivial']} tool-free"
+            line += ")"
             if "p_value" in e:
                 line += f"  p={e['p_value']:.3f} ({e['perm']} perms)"
             print(line)
@@ -807,32 +1342,38 @@ def main() -> int:
             "headers": {"RITS_API_KEY": judge_key, "Content-Type": "application/json"},
         }
 
-    conditions_runs: Dict[str, Dict[str, RunMap]] = {}
+    conditions: Dict[str, Condition] = {}
     for name, d in conds.items():
-        runs = load_condition(d)
-        if not runs:
+        cond = load_condition(d, name)
+        if not cond.runs:
             print(f"warning: condition {name!r} ({d}) has no usable run_* dirs — skipping",
                   file=sys.stderr)
             continue
-        conditions_runs[name] = runs
-        print(f"Loaded condition {name!r}: {len(runs)} runs from {d}")
+        conditions[name] = cond
+        print(f"Loaded condition {name!r}: {len(cond.runs)} runs, "
+              f"{len(cond.sessions)} sessions from {d}")
 
-    if not conditions_runs:
+    if not conditions:
         print("error: no conditions had usable data.", file=sys.stderr)
         return 1
 
     analysis: Dict[str, Any] = {"conditions": {}}
-    for name, runs in conditions_runs.items():
-        mat = run_pair_matrix(runs)
+    for name, cond in conditions.items():
+        # Session scope first: every other view is derived from these pair records, so the
+        # per-session table, the run x run matrix and the trajectory thetas cannot disagree.
+        sess = per_session_analysis(cond, args.alpha)
         analysis["conditions"][name] = {
-            "run_pair_matrix": mat,
-            "u_statistic": u_statistic(runs, kernel, args.alpha, judge_cfg),
-            "trajectory_u_statistic": trajectory_u_statistic(runs, args.alpha),
-            "h1": h1_check(mat),
+            "per_session": sess,
+            "run_pair_matrix": run_pair_matrix(sess["sessions"], sorted(cond.runs)),
+            "u_statistic": session_u_statistic(cond, kernel, args.alpha),
+            "trajectory_u_statistic": trajectory_u_statistic(sess["sessions"], args.alpha),
+            "h1": h1_check(sess),
+            # A different, explicitly event-scoped question — and where the judge lives.
+            "event_u_statistic": u_statistic(cond.runs, kernel, args.alpha, judge_cfg),
         }
 
-    if len(conditions_runs) >= 2:
-        analysis["mmd"] = cross_condition_mmd(conditions_runs, args.perm, args.seed)
+    if len(conditions) >= 2:
+        analysis["mmd"] = cross_condition_mmd(conditions, args.perm, args.seed)
 
     print_report(analysis)
 

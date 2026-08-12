@@ -1,17 +1,22 @@
-"""Traces Similarity: Compare two full trace profiles.
+"""Traces Similarity: build a trace profile, and compare two of them.
 
 Each profile represents one execution of a complete trace (one run of one model).
-Functions in this module take two profiles and return similarity scores.
-All metrics are normalized to [0, 1].
+`extract_profile` turns a run's records into one, and the comparison functions take two
+profiles and return similarity scores. All metrics are normalized to [0, 1].
 
-Like response_similarity.py, this module only COMPARES. Profiles are built by
-parsing.extract_profile — which is where records are read and parsed — so nothing here
-touches a raw record.
+`extract_profile` is the only place in this library that walks raw records, and it does so
+only by delegating to replay_parsing.parse_response — it reads no files and decodes no JSON
+itself. It lives here rather than in replay_parsing.py because its field set is chosen
+entirely by compare_profiles: `tool_sequence` exists for the LCS metric,
+`tool_call_sequence` for the arg-aware ordered-dedup metric, `unique_tools` for the Jaccard.
+It is the profile *metric's* input format, not a general view of a run.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
-from .parsing import response_signature
+from replay_parsing import extract_tool_names, parse_response
+
+from .signatures import response_signature, tool_args_signature
 from .response_similarity import (
     collapse_adjacent,
     compare_responses,
@@ -19,6 +24,66 @@ from .response_similarity import (
     tool_sequence_lcs,
 )
 
+
+# ------------------------------------------------------- records -> trace profile
+
+def extract_profile(records: List[dict]) -> dict:
+    """Extract a trace profile from a list of request-response records.
+
+    Args:
+        records: List of dicts from per_request_lifecycle_metrics.json
+
+    Returns:
+        dict with keys:
+          - tool_sequence: Tuple[str, ...] — ordered tool NAMES across all requests
+          - tool_call_sequence: Tuple[Tuple[str, str], ...] — ordered (name, canonical-args)
+            tokens across all requests; the arg-aware counterpart of tool_sequence, used by
+            the ordered-dedup trace metric (two calls match only if name AND args agree)
+          - unique_tools: set — set of tool names used
+          - num_requests: int — how many request-response pairs
+          - num_tool_calls: int — total tool invocations
+          - num_errors: int — how many requests errored
+          - responses: List[dict] — parsed responses (ok, content, tool_calls, etc.)
+          - records: List[dict] — original records
+
+    This is the parsing step for a whole run: the resulting profile is what
+    compare_profiles consumes, and its `responses` are already parsed, so the comparison
+    functions below never re-read a raw record.
+    """
+    all_tool_names: List[str] = []
+    all_tool_calls: List[Tuple[str, str]] = []
+    responses = []
+    num_errors = 0
+
+    for rec in records:
+        parsed = parse_response(rec)
+        responses.append(parsed)
+
+        if not parsed["ok"]:
+            num_errors += 1
+            continue
+
+        # Extract tool names in order.
+        all_tool_names.extend(extract_tool_names(parsed["tool_calls"]))
+        # Arg-aware tokens in order: (name, canonical-args) per call, spanning the whole trace.
+        all_tool_calls.extend(tool_args_signature(parsed["tool_calls"]))
+
+    tool_sequence = tuple(all_tool_names)
+    unique_tools = set(all_tool_names)
+
+    return {
+        "tool_sequence": tool_sequence,
+        "tool_call_sequence": tuple(all_tool_calls),
+        "unique_tools": unique_tools,
+        "num_requests": len(records),
+        "num_tool_calls": len(all_tool_names),
+        "num_errors": num_errors,
+        "responses": responses,
+        "records": records,
+    }
+
+
+# ------------------------------------------------------------ profile comparison
 
 def compare_session_depths(depth_a: int, depth_b: int) -> float:
     """Compare session depths (# of requests).
@@ -65,7 +130,7 @@ def compare_response_lists(
 def compare_profiles(profile_a: dict, profile_b: dict) -> Dict[str, float]:
     """Compare two trace profiles, returning all metrics.
 
-    Input: two dicts from parsing.extract_profile() with keys:
+    Input: two dicts from extract_profile() above, with keys:
            tool_sequence, tool_call_sequence, unique_tools, num_requests, num_errors,
            responses, records
 

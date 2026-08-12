@@ -1,18 +1,38 @@
-"""Parsing: the single module that turns raw data into comparison-ready inputs.
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Replay-report parsing: raw files and records in, plain data out.
 
 Everything that touches a file, a raw request-response record, or a JSON string lives here.
-Nothing here computes a metric — that is the job of response_similarity.py (per-turn) and
-traces_similarity.py (per-trace), which take the outputs of this module as their inputs and
-never parse anything themselves.
+This module is deliberately **general** — it knows the shape of a replay report and nothing
+about consistency, similarity or any metric. It imports only the standard library, and in
+particular imports nothing from `compare/`, so a notebook or a DataFrame script that only
+wants to read a run can use it without pulling in the comparison library.
 
-The layers, in the order data flows through them:
-
-  file            load_records / load_run / find_run_dirs
+  file            find_run_dirs / load_records / load_run
   record          parse_response / parse_records        -> parsed response dict
   record          request_key / session_key / event_key -> grouping identity
-  tool_calls      extract_tool_names / tool_signature / tool_args_signature / tool_kv_set
-  parsed response response_signature                    -> exact-match unit
-  records         extract_profile                       -> trace profile
+  tool_calls      call_fields / extract_tool_names      -> names and raw arguments
+  normalization   collapse_ws / strip_ws
+
+What is deliberately NOT here: the canonical forms that exist only to be compared — the
+tool/response signatures and the kv-set (`compare/signatures.py`) — and the trace profile that
+`compare_profiles` consumes (`compare/traces_similarity.py`). Those are metric definitions:
+changing them changes what a caller counts as "the same response". Splitting a record into
+fields is not. `require_parsed`, the guard asserting a dict came from `parse_response`, lives
+in `compare/signatures.py` too: it describes this module's output, but only the comparators
+ever call it.
 
 Callers should parse ONCE, up front, and pass the results around: parsing a record is
 expensive relative to a comparison, and a pairwise analysis touches each record many times.
@@ -213,7 +233,12 @@ def parse_response(record: dict) -> Dict[str, Any]:
         return out
     msg = choices[0].get("message", {}) or {}
     out["content"] = (msg.get("content") or "").strip()
-    out["reasoning"] = (msg.get("reasoning_content") or "").strip()
+    # Both spellings, `reasoning` first — the same order the harness uses everywhere it reads
+    # a chain-of-thought off the wire (openai_client.py, replay_graph_session_datagen.py).
+    # vLLM/RITS return `reasoning`; `reasoning_content` is the OpenAI-style alias the harness
+    # writes back out when it *re*-serializes a message (apis/chat.py sets both). Reading only
+    # the alias silently yielded "" for every recorded response.
+    out["reasoning"] = (msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
     out["tool_calls"] = msg.get("tool_calls") or []
     out["finish_reason"] = choices[0].get("finish_reason")
     usage = body.get("usage") or {}
@@ -232,25 +257,9 @@ def parse_records(records: List[dict]) -> List[Dict[str, Any]]:
     return [parse_response(rec) for rec in records]
 
 
-def require_parsed(response: dict, what: str = "response") -> dict:
-    """Assert `response` came from parse_response; raise a pointed error if it did not.
-
-    The comparison layer used to silently re-parse anything without an `ok` key, which hid
-    both the cost (re-parsing the same record on every pairwise comparison) and the bug
-    class where a caller passed a raw record and got metrics computed over the wrong shape.
-    Parsing now happens once, in the run script; this is the guard that keeps it that way.
-    """
-    if not isinstance(response, dict) or "ok" not in response:
-        raise ValueError(
-            f"{what} is not a parsed response (no 'ok' key); "
-            "call compare.parse_response(record) first"
-        )
-    return response
-
-
 # ---------------------------------------------------------- tool-call extraction
 
-def _call_fields(tc: Any) -> Tuple[Optional[str], Any]:
+def call_fields(tc: Any) -> Tuple[Optional[str], Any]:
     """Unpack one tool-call entry into (name, raw-arguments).
 
     Centralizes the defensive `tc["function"]["name"] / ["arguments"]` access repeated
@@ -262,6 +271,10 @@ def _call_fields(tc: Any) -> Tuple[Optional[str], Any]:
     instead, which is what the viewer's flattened tool summaries carry
     (export_viewer_data.version_from_record). A `function` block always wins, so a wire-shape
     entry can never be misread from stray top-level keys.
+
+    Public (rather than the `_call_fields` it used to be) because the signature builders in
+    compare/signatures.py read it too, and importing a private name across a module boundary
+    would be worse than naming it.
     """
     if not isinstance(tc, dict):
         return None, None
@@ -278,143 +291,7 @@ def extract_tool_names(tool_calls: List[dict]) -> Tuple[str, ...]:
     """Extract ordered tool names from tool_calls list."""
     names = []
     for tc in tool_calls:
-        name, _ = _call_fields(tc)
+        name, _ = call_fields(tc)
         if name:
             names.append(name)
     return tuple(names)
-
-
-def tool_signature(tool_calls: List[dict]) -> Tuple:
-    """Comparable signature of tool calls: sequence of (name, sorted arg keys).
-
-    Compares tool names and argument structure, but not argument values.
-    """
-    sig = []
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            keys = tuple(sorted(args.keys())) if isinstance(args, dict) else ("<non-dict-args>",)
-        except (json.JSONDecodeError, TypeError):
-            keys = ("<unparseable-args>",)
-        sig.append((name, keys))
-    return tuple(sig)
-
-
-def tool_args_signature(tool_calls: List[dict]) -> Tuple:
-    """Full signature including canonical arg VALUES.
-
-    Whitespace-insensitive: valid JSON is re-serialized canonically (so key order and
-    inter-token spacing don't matter), and the unparseable fallback is whitespace-collapsed.
-    """
-    sig = []
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            canon = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        except (json.JSONDecodeError, TypeError):
-            canon = strip_ws(str(args_raw))
-        sig.append((name, canon))
-    return tuple(sig)
-
-
-def tool_kv_set(tool_calls: List[dict]) -> frozenset:
-    """Flatten a turn's tool calls to a {(tool.key, canonical-value)} set (Yagubyan AC unit).
-
-    Keys are namespaced by tool name so identical arg names on different tools don't
-    collide; values are canonical JSON so key order / spacing can't fork them. This is the
-    precomputed unit both compare_tool_arguments and argument_consistency compare.
-    """
-    kv: set = set()
-    for tc in tool_calls:
-        name, args_raw = _call_fields(tc)
-        name = name or "<unnamed>"
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-        except (json.JSONDecodeError, TypeError):
-            args = {}
-        if isinstance(args, dict):
-            for k, v in args.items():
-                kv.add((f"{name}.{k}", json.dumps(v, sort_keys=True, ensure_ascii=False)))
-    return frozenset(kv)
-
-
-def response_signature(response: dict) -> Optional[str]:
-    """Exact-match unit: collapse_ws(content) + canonical tool-args.
-
-    None if the response errored. This is the single definition of "the same response",
-    shared by every caller (analyze_consistency's modal counts, consistency_statistics'
-    Feature, export_viewer_data's cluster coloring, find_metric_witnesses' exact_match, and
-    compare_profiles' exact_match), so a tool turn with identical empty text but different
-    args is correctly counted as non-identical everywhere.
-
-    Takes an already-parsed response (or any dict carrying ok / content / tool_calls, such
-    as the viewer's flattened version dicts) — raises on a raw record.
-    """
-    require_parsed(response)
-    if not response.get("ok"):
-        return None
-    content = response.get("content", "")
-    calls = response.get("tool_calls") or []
-    return collapse_ws(content) + "\x00" + json.dumps(
-        tool_args_signature(calls), ensure_ascii=False
-    )
-
-
-# ------------------------------------------------------- records -> trace profile
-
-def extract_profile(records: List[dict]) -> dict:
-    """Extract a trace profile from a list of request-response records.
-
-    Args:
-        records: List of dicts from per_request_lifecycle_metrics.json
-
-    Returns:
-        dict with keys:
-          - tool_sequence: Tuple[str, ...] — ordered tool NAMES across all requests
-          - tool_call_sequence: Tuple[Tuple[str, str], ...] — ordered (name, canonical-args)
-            tokens across all requests; the arg-aware counterpart of tool_sequence, used by
-            the ordered-dedup trace metric (two calls match only if name AND args agree)
-          - unique_tools: set — set of tool names used
-          - num_requests: int — how many request-response pairs
-          - num_tool_calls: int — total tool invocations
-          - num_errors: int — how many requests errored
-          - responses: List[dict] — parsed responses (ok, content, tool_calls, etc.)
-          - records: List[dict] — original records
-
-    This is the parsing step for a whole run: the resulting profile is what
-    traces_similarity.compare_profiles consumes, and its `responses` are already parsed, so
-    the comparison layer never re-reads a raw record.
-    """
-    all_tool_names: List[str] = []
-    all_tool_calls: List[Tuple[str, str]] = []
-    responses = []
-    num_errors = 0
-
-    for rec in records:
-        parsed = parse_response(rec)
-        responses.append(parsed)
-
-        if not parsed["ok"]:
-            num_errors += 1
-            continue
-
-        # Extract tool names in order.
-        all_tool_names.extend(extract_tool_names(parsed["tool_calls"]))
-        # Arg-aware tokens in order: (name, canonical-args) per call, spanning the whole trace.
-        all_tool_calls.extend(tool_args_signature(parsed["tool_calls"]))
-
-    tool_sequence = tuple(all_tool_names)
-    unique_tools = set(all_tool_names)
-
-    return {
-        "tool_sequence": tool_sequence,
-        "tool_call_sequence": tuple(all_tool_calls),
-        "unique_tools": unique_tools,
-        "num_requests": len(records),
-        "num_tool_calls": len(all_tool_names),
-        "num_errors": num_errors,
-        "responses": responses,
-        "records": records,
-    }

@@ -51,15 +51,18 @@ import sys
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
-# Per-pair metric primitives come from compare/ (single source of truth).
+# Record reading comes from replay_parsing, the per-pair metric primitives from compare/
+# (single source of truth for each).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import (  # noqa: E402
-    # Parsing.
+from replay_parsing import (  # noqa: E402
     find_run_dirs,
     load_run,
     parse_response,
     collapse_ws,
     extract_tool_names,
+)
+from compare import (  # noqa: E402
+    # Canonical units.
     tool_kv_set,
     response_signature,
     # Metrics.
@@ -158,7 +161,7 @@ def metric_vector(pa: dict, pb: dict) -> Dict[str, float]:
     kva, kvb = tool_kv_set(pa["tool_calls"]), tool_kv_set(pb["tool_calls"])
     ac = argument_consistency(kva, kvb)
     return {
-        # response_signature (compare/parsing.py) is the shared exact-match unit.
+        # response_signature (compare/signatures.py) is the shared exact-match unit.
         "exact_match": 1.0 if response_signature(pa) == response_signature(pb) else 0.0,
         "content_levenshtein": normalized_levenshtein(collapse_ws(ca), collapse_ws(cb)),
         "content_jaccard": jaccard(ca, cb),

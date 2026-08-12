@@ -10,25 +10,43 @@ responses and traces.
 - Output: `Dict[str, float]` with metrics normalized to [0, 1]
 - No aggregation, no statistics, no side effects, **no parsing** — just comparison
 
+`reliability.py` is the one documented exception, for a reason stated in its docstring: the
+hal-harness Consistency metrics are each defined as a variance or a mean *over all K runs of a
+session*, so there is no per-pair core to factor out — the aggregation is the definition. It is
+therefore also the only module here that does statistics, imports `numpy`, or reads files (it
+delegates the reads to `replay_parsing`). Everything else obeys the contract above.
+
 This makes the library composable: any caller can use it for any comparison task. It is the
 **single source of truth** for per-pair metrics; the analyzers (`analyze_consistency.py`,
 `consistency_statistics.py`) and the viewer/witness exporters all import these primitives
 so every caller shares one metric definition and owns only the aggregation layer.
 
-### Parsing is one module, and callers own it
+### Parsing lives outside this library
 
-`parsing.py` is the single place that touches a file, a raw record, or a JSON string.
-Nothing in it computes a metric; nothing outside it parses.
+Everything that touches a file, a raw record, or a JSON string is in **`replay_parsing.py`**, a
+stdlib-only module one directory up (a sibling of `compare/`, not inside it). It knows the shape
+of a replay report and nothing about consistency or any metric, so a notebook or a DataFrame
+script that only wants to *read* a run imports it without pulling in any comparison code. This
+library imports it; it never imports this library.
+
+Everything inside `compare/` defines or computes a metric — including the canonical forms in
+`signatures.py`, which look like parsing but are not: `response_signature` *is* the definition of
+"the same response", so changing it changes what every caller counts.
 
 ```
-parsing.py            files + raw records → parsed responses / profiles   (no metrics)
+replay_parsing.py      files + raw records → parsed responses, grouping keys  (no metrics)
   ↑
-response_similarity.py Level 1 comparators + the string/tool metrics       (no parsing)
+signatures.py          the canonical forms equality and a Jaccard are taken over
   ↑
-traces_similarity.py   Level 2 profile comparison                          (no parsing)
+response_similarity.py Level 1 comparators + the string/tool metrics           (no parsing)
+  ↑
+traces_similarity.py   records → trace profile, and Level 2 profile comparison
 kernels.py             positive-definite trajectory kernels (JS, GAK)
-compare_runs.py        the CLI — the only place in the library that parses
+reliability.py         hal-harness Consistency (C) metrics over a session's K runs (uses kernels)
 ```
+
+The library has no CLI of its own — the callers (`analyze_consistency.py`,
+`consistency_statistics.py`, the exporters) each parse once up front and pass parsed data down.
 
 The comparators therefore **refuse** raw records rather than quietly parsing them:
 `compare_responses(a, b)` and `response_signature(r)` raise `ValueError` when handed a dict
@@ -37,7 +55,8 @@ never re-parsed per pairwise comparison, and a raw record can't be silently comp
 though it were parsed.
 
 ```python
-from compare import load_records, parse_records, compare_responses
+from replay_parsing import load_records, parse_records
+from compare import compare_responses
 
 responses = parse_records(load_records(path))       # parse once, here
 compare_responses(responses[0], responses[1])       # comparators only compare
@@ -50,6 +69,7 @@ compare_responses(responses[0], responses[1])       # comparators only compare
 Compare two complete trace profiles (a full execution of a task/conversation — i.e. one run).
 
 ```python
+from replay_parsing import load_run
 from compare import extract_profile, compare_profiles
 
 # Load and extract profiles from two runs
@@ -79,7 +99,8 @@ similarity = compare_profiles(profile_1, profile_2)
 Compare two individual response records (one turn of a conversation).
 
 ```python
-from compare import compare_responses, parse_response
+from replay_parsing import parse_response
+from compare import compare_responses
 
 response_a = parse_response(record_a)  # required — compare_responses will not parse for you
 response_b = parse_response(record_b)
@@ -105,10 +126,10 @@ similarity = compare_responses(response_a, response_b)
 
 ## Core Functions
 
-### Parsing / IO (`parsing.py`)
+### Parsing / IO — **`replay_parsing`**, not `compare`
 
-Everything that reads a file or a raw record. Import these from `compare`; call them from your
-run script, not from inside a comparison loop.
+Everything that reads a file or a raw record. Import these from `replay_parsing`; call them from
+your run script, not from inside a comparison loop.
 
 | Function | Input | Output |
 |----------|-------|--------|
@@ -117,17 +138,32 @@ run script, not from inside a comparison loop.
 | `load_run(run_dir)` | a `run_*` dir | List[dict] — tolerant wrapper (`[]` if absent/unreadable) |
 | `parse_response(record)` | one raw record | Dict[str, Any] (ok, has_output, content, tool_calls, timing, tokens, …) |
 | `parse_records(records)` | List[dict] raw | List[dict] parsed |
-| `extract_profile(records)` | List[dict] raw, one run | dict of profile features (incl. parsed `responses`) |
-| `require_parsed(r, what)` | a dict | the dict, or `ValueError` if it isn't parsed |
 | `request_key` / `session_key` / `event_key` | one raw record | str — grouping identity |
+| `call_fields(tool_call)` | one tool-call dict | `(name, raw-arguments)`, or `(None, None)` |
+| `extract_tool_names(tool_calls)` | a tool_calls list | Tuple[str, ...] — ordered names |
+| `collapse_ws` / `strip_ws` | str | str — prose / structural normalization |
 
 Both tool-call wire shapes are accepted: `{"function": {"name", "arguments"}}` and the flat
 `{"name", "arguments"}` used by the viewer's flattened summaries.
+
+### Canonical Units (`signatures.py`)
+
+The forms equality and Jaccard are taken over — metric definitions, so a change here changes
+every caller's numbers.
+
+| Function | Input | Output |
+|----------|-------|--------|
+| `response_signature(r)` | one **parsed** response | Optional[str] — the exact-match unit; `None` if it errored |
+| `tool_signature(tool_calls)` | a tool_calls list | Tuple of (name, sorted arg **keys**) |
+| `tool_args_signature(tool_calls)` | a tool_calls list | Tuple of (name, canonical arg **values**) |
+| `tool_kv_set(tool_calls)` | a tool_calls list | frozenset of `(tool.key, canonical-value)` |
+| `require_parsed(r, what)` | a dict | the dict, or `ValueError` if it isn't parsed |
 
 ### Profile Functions (`traces_similarity.py`)
 
 | Function | Input | Output |
 |----------|-------|--------|
+| `extract_profile(records)` | List[dict] raw, one run | dict of profile features (incl. parsed `responses`) |
 | `compare_profiles(p1, p2)` | two profile dicts from `extract_profile` | Dict[str, float] |
 | `compare_response_lists(a, b)` | two lists of **parsed** responses | Dict[str, float] |
 
@@ -143,13 +179,6 @@ Content similarity (all in [0, 1]):
 - `normalized_levenshtein(a, b)` → float — exact edit distance; the headline figure
 - `fast_content_ratio(a, b)` → float — approximate (difflib), for large run × run matrices
 - `jaccard(a, b)` → float — word-set overlap
-
-Tool-call names / signatures (in `parsing.py` — these read raw tool-call dicts):
-- `extract_tool_names(tool_calls)` → Tuple[str, ...]
-- `tool_signature(tool_calls)` → Tuple of (name, sorted arg **keys**)
-- `tool_args_signature(tool_calls)` → Tuple of (name, canonical arg **values**)
-- `response_signature(response)` → Optional[str] — exact-match unit (content + tool args)
-- `tool_kv_set(tool_calls)` → frozenset of `(tool.key, canonical-value)`
 
 Tool-call comparators (all in [0, 1] unless noted):
 - `compare_tool_calls(a, b)` → float (1/0: exact names + args)
@@ -170,7 +199,8 @@ Trajectory kernels (positive-definite, normalized to (0, 1] with k(x, x) = 1):
 ### Simple: compare two runs
 
 ```python
-from compare import load_records, extract_profile, compare_profiles
+from replay_parsing import load_records
+from compare import extract_profile, compare_profiles
 
 records_1 = load_records("run_1/per_request_lifecycle_metrics.json")
 records_2 = load_records("run_2/per_request_lifecycle_metrics.json")
@@ -181,16 +211,17 @@ print(f"Response similarity:      {result['response_similarity']:.1%}")
 print(f"Exact match:              {bool(result['exact_match'])}")
 ```
 
-Or from the command line:
+Or from the command line, via the analyzers that consume all N runs at once:
 
 ```bash
-python compare/compare_runs.py run_1/per_request_lifecycle_metrics.json \
-                               run_2/per_request_lifecycle_metrics.json --verbose
+python analyze_consistency.py    <reports_base_dir> --out analysis.json   # per-group metrics
+python consistency_statistics.py <reports_base_dir>                       # theta + CI
 ```
 
 ### Advanced: pairwise run comparison with statistics
 
 ```python
+from replay_parsing import load_run
 from compare import extract_profile, compare_profiles
 import statistics
 
@@ -208,7 +239,8 @@ print(f"Std dev:                       {statistics.stdev(sims):.1%}")
 ### Fine-grained: find divergence point
 
 ```python
-from compare import compare_responses, parse_records
+from replay_parsing import parse_records
+from compare import compare_responses
 
 responses_a = parse_records(records_a)   # parse once; the comparator won't do it for you
 responses_b = parse_records(records_b)
@@ -222,10 +254,10 @@ for i, (resp_a, resp_b) in enumerate(zip(responses_a, responses_b)):
 
 ## Integration with Existing Code
 
-The library is standalone and is imported wherever parsing or per-pair metrics are needed. All
-four sibling scripts get their record reading, grouping keys, tool-call extraction and
-exact-match signature from `compare.parsing`, so none of them re-implements the derive step;
-each owns only its own aggregation:
+The library is standalone and is imported wherever a per-pair metric is needed. The sibling
+scripts get their record reading, grouping keys and tool-call extraction from `replay_parsing`
+and their exact-match signature from `compare.signatures`, so none of them re-implements the
+derive step; each owns only its own aggregation:
 
 - `analyze_consistency.py` — imports the primitives for group-level modal/distinct/CV metrics.
 - `consistency_statistics.py` — uses the primitives and kernels for the U-statistic θ,
@@ -234,6 +266,9 @@ each owns only its own aggregation:
   find and render example pairs for each metric.
 - `export_viewer_data.py` — reuses the same primitives so the viewer's numbers match the
   analyzer's exactly.
+- `reliability_metrics.py` / `reliability_analysis.ipynb` — thin front-ends over
+  `reliability.compute_all`; they add only reporting, since that module already owns its own
+  loading and aggregation.
 
 ## Metric Details
 
@@ -299,5 +334,7 @@ each owns only its own aggregation:
 ## Testing
 
 ```bash
-python -m pytest compare/test_*.py -v  # unit tests
+# From the kit dir. Both paths matter: the general layer's tests live next to the module it
+# tests, one level up from compare/.
+python -m pytest compare/ test_replay_parsing.py -v
 ```

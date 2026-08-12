@@ -49,14 +49,13 @@ from collections import Counter, defaultdict
 from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
-# Parsing AND the per-pair metric primitives live in compare/ (the single source of truth):
-# compare.parsing owns everything that reads a file or a raw record (load_run, parse_response,
-# the event/session/request keys, the exact-match signature), and the similarity modules own
-# the comparators. This module owns only the aggregation layer (modal fractions, per-trace
-# roll-up, the LLM judge).
+# Parsing and the per-pair metric primitives are each imported from their single source of
+# truth: replay_parsing owns everything that reads a file or a raw record (load_run,
+# parse_response, the event/session/request keys), and compare/ owns the canonical units and
+# the comparators (the exact-match signature, the similarity metrics). This module owns only
+# the aggregation layer (modal fractions, per-trace roll-up, the LLM judge).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import (  # noqa: E402
-    # Parsing / IO / grouping.
+from replay_parsing import (  # noqa: E402
     find_run_dirs,
     load_run,
     parse_response,
@@ -64,6 +63,9 @@ from compare import (  # noqa: E402
     request_key,
     session_key,
     event_key,
+)
+from compare import (  # noqa: E402
+    # Canonical units.
     response_signature,
     tool_signature,
     tool_args_signature,
@@ -129,7 +131,7 @@ def analyze_group(records: List[dict]) -> Dict[str, Any]:
     # Exact reproducibility. The "response" is content PLUS any tool calls (canonical
     # args), so a tool turn with identical empty text but different args is correctly
     # counted as non-identical rather than byte-identical. response_signature is the shared
-    # definition of that unit (compare/parsing.py) — every caller counts the same thing.
+    # definition of that unit (compare/signatures.py) — every caller counts the same thing.
     signatures = [response_signature(p) for p in ok]
     distinct = Counter(signatures)
     result["exact"] = {

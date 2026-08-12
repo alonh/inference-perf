@@ -1,18 +1,20 @@
-"""Unit tests for compare module."""
+"""Unit tests for the compare module — metrics, canonical units, profile comparison.
+
+parse_response / parse_records are imported from replay_parsing purely as fixtures: these
+tests need realistic parsed input, but the parser's own behaviour is covered next door in
+test_replay_parsing.py.
+"""
 
 import json
 import pytest
+from replay_parsing import extract_tool_names, parse_response, parse_records
 from compare import (
     compare_responses,
     compare_profiles,
     extract_profile,
-    load_records,
-    parse_response,
-    parse_records,
     normalized_levenshtein,
     fast_content_ratio,
     jaccard,
-    extract_tool_names,
     compare_tool_calls,
     compare_tool_calls_ordered_dedup,
     collapse_adjacent,
@@ -24,7 +26,6 @@ from compare import (
     global_alignment_kernel,
     action_histogram,
 )
-from compare.parsing import _call_fields
 
 
 def _call(name, **args):
@@ -62,42 +63,8 @@ class TestStringMetrics:
         # 2 words overlap (hello, world) out of 5 unique words total
 
 
-class TestParseResponse:
-    """Test response parsing."""
-
-    def test_parse_response_ok(self):
-        record = {
-            "response": json.dumps({
-                "choices": [{
-                    "message": {
-                        "content": "test",
-                        "tool_calls": []
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {"completion_tokens": 10}
-            })
-        }
-        parsed = parse_response(record)
-        assert parsed["ok"] is True
-        assert parsed["content"] == "test"
-        assert parsed["completion_tokens"] == 10
-
-    def test_parse_response_error(self):
-        record = {"error": {"error_type": "timeout"}}
-        parsed = parse_response(record)
-        assert parsed["ok"] is False
-        assert parsed["error"] == "timeout"
-
-    def test_parse_response_empty_response(self):
-        record = {"response": None}
-        parsed = parse_response(record)
-        assert parsed["ok"] is False
-        assert parsed["error"] == "empty_response"
-
-
 class TestParsingContract:
-    """compare.parsing owns parsing; the comparators refuse to do it for you."""
+    """replay_parsing owns parsing; the comparators refuse to do it for you."""
 
     RAW = {
         "response": json.dumps({
@@ -135,26 +102,10 @@ class TestParsingContract:
         assert parse_records([]) == []
 
 
-class TestCallFields:
-    """Both tool-call wire shapes are readable; junk degrades to (None, None)."""
-
-    def test_nested_function_shape(self):
-        assert _call_fields({"function": {"name": "grep", "arguments": "{}"}}) == ("grep", "{}")
-
-    def test_flat_shape(self):
-        # export_viewer_data's flattened summaries carry name/arguments at top level.
-        assert _call_fields({"name": "grep", "arguments": "{}"}) == ("grep", "{}")
-
-    def test_function_block_wins_over_top_level(self):
-        tc = {"function": {"name": "inner", "arguments": "{}"}, "name": "outer"}
-        assert _call_fields(tc) == ("inner", "{}")
-
-    def test_junk(self):
-        assert _call_fields(None) == (None, None)
-        assert _call_fields("grep") == (None, None)
-        assert _call_fields({}) == (None, None)
-        assert _call_fields({"function": "not-a-dict"}) == (None, None)
-        assert _call_fields({"id": "call_1"}) == (None, None)  # no name/arguments => not flat
+class TestWireShapeReachesTheMetrics:
+    """The flat tool-call shape has to survive replay_parsing.call_fields all the way into a
+    signature — the one assertion that spans the module boundary. call_fields' own edge cases
+    are covered in test_replay_parsing.py."""
 
     def test_flat_shape_reaches_the_signature(self):
         flat = {"ok": True, "content": "x", "tool_calls": [{"name": "g", "arguments": '{"p": 1}'}]}
@@ -164,45 +115,8 @@ class TestCallFields:
         assert extract_tool_names(flat["tool_calls"]) == ("g",)
 
 
-class TestLoadRecords:
-    """The three on-disk shapes load_records accepts, plus the one it rejects."""
-
-    REC = {"event_id": "e1", "response": None}
-
-    def _write(self, tmp_path, obj):
-        p = tmp_path / "metrics.json"
-        p.write_text(json.dumps(obj))
-        return str(p)
-
-    def test_bare_list(self, tmp_path):
-        assert load_records(self._write(tmp_path, [self.REC])) == [self.REC]
-
-    def test_contents_key(self, tmp_path):
-        assert load_records(self._write(tmp_path, {"contents": [self.REC]})) == [self.REC]
-
-    def test_records_key(self, tmp_path):
-        assert load_records(self._write(tmp_path, {"records": [self.REC]})) == [self.REC]
-
-    def test_unknown_dict_raises(self, tmp_path):
-        path = self._write(tmp_path, {"something_else": [self.REC]})
-        with pytest.raises(ValueError, match="Unexpected data format"):
-            load_records(path)
-
-
 class TestToolMetrics:
     """Test tool-related metrics."""
-
-    def test_extract_tool_names(self):
-        tool_calls = [
-            {"function": {"name": "find", "arguments": "{}"}},
-            {"function": {"name": "grep", "arguments": "{}"}},
-        ]
-        names = extract_tool_names(tool_calls)
-        assert names == ("find", "grep")
-
-    def test_extract_tool_names_empty(self):
-        names = extract_tool_names([])
-        assert names == ()
 
     def test_compare_tool_calls_identical(self):
         calls = [{"function": {"name": "grep", "arguments": '{"pattern": "foo"}'}}]

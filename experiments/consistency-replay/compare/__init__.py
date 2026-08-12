@@ -1,49 +1,42 @@
 """Consistency comparison library — the single source of truth for per-pair metrics.
 
-Three modules, one direction of dependency:
+Everything here defines or computes a metric. Reading a file, parsing a raw record and
+deriving a record's grouping identity are general operations that no longer live here: they
+are in `replay_parsing`, a stdlib-only module one level up, which a notebook or a DataFrame
+script can import without pulling in any of this. This library imports it, never the reverse.
 
-  parsing.py              files / raw records / JSON  -> comparison-ready inputs
+  replay_parsing (external)  files / raw records / JSON  -> parsed responses, grouping keys
+    ↑
+  signatures.py           the canonical forms equality and a Jaccard are taken over
+    ↑
   response_similarity.py  Level 1: compare two parsed responses (one turn)
-  traces_similarity.py    Level 2: compare two trace profiles (one full run)
+    ↑
+  traces_similarity.py    Level 2: build a trace profile, compare two of them (one full run)
 
-Parsing happens ONCE, up front, in the caller — compare_runs.py is the library's own worked
-example. The two similarity modules never read a file and never parse a record; hand them a
-raw record and they raise. Both return Dict[str, float] with metrics in [0, 1]. There is
-deliberately NO composite "overall similarity" — for one grounded consistency figure use the
-U-statistic theta in consistency_statistics.py, which carries a confidence interval.
+Parsing happens ONCE, up front, in the caller (see README.md for the worked example). The
+similarity modules never read a file and never parse a record; hand them a raw record and
+they raise. Both return Dict[str, float] with metrics in [0, 1]. There is deliberately NO
+composite "overall similarity" — for one grounded consistency figure use the U-statistic
+theta in consistency_statistics.py, which carries a confidence interval.
 
 The analyzers (analyze_consistency.py, consistency_statistics.py) and the viewer / witness
-exporters import the primitives below so every caller shares one metric definition AND one
-parse definition; they own the aggregation layer (modal fractions, U-statistic theta/CI,
-run x run matrices, MMD, the LLM judge).
+exporters import the primitives below so every caller shares one metric definition; they own
+the aggregation layer (modal fractions, U-statistic theta/CI, run x run matrices, MMD, the
+LLM judge).
 """
 
-from .parsing import (
-    # File IO.
-    find_run_dirs,
-    load_records,
-    load_run,
-    # Record -> parsed response.
-    parse_response,
-    parse_records,
+from .signatures import (
+    # The parsed-input guard: this library's contract with replay_parsing.
     require_parsed,
-    # Record identity / grouping.
-    request_key,
-    session_key,
-    event_key,
-    # Records -> trace profile.
-    extract_profile,
-    # Whitespace normalization.
-    collapse_ws,
-    strip_ws,
-    # Tool-call signatures / names.
-    extract_tool_names,
+    # Canonical tool-call / response units that equality and Jaccard are taken over.
     tool_signature,
     tool_args_signature,
-    response_signature,
     tool_kv_set,
+    response_signature,
 )
 from .traces_similarity import (
+    # Records -> trace profile (the input format compare_profiles consumes).
+    extract_profile,
     compare_profiles,
     compare_response_lists,
     compare_session_depths,
@@ -70,32 +63,33 @@ from .kernels import (
     action_histogram,
     js_divergence,
 )
+from .reliability import (
+    # hal-harness reliability_eval Consistency (C) metrics — session-level replay port.
+    SessionRun,
+    SessionMetrics,
+    session_success,
+    summarize_session_run,
+    load_session_runs,
+    compute_outcome_consistency,
+    compute_trajectory_consistency,
+    compute_resource_consistency,
+    seq_levenshtein_similarity,
+    weighted_r_con,
+    compute_session_metrics,
+    aggregate as aggregate_consistency,
+    compute_all as compute_consistency,
+)
 
 __all__ = [
-    # Parsing: file IO
-    "find_run_dirs",
-    "load_records",
-    "load_run",
-    # Parsing: record -> parsed response
-    "parse_response",
-    "parse_records",
+    # Contract with replay_parsing
     "require_parsed",
-    # Parsing: record identity / grouping
-    "request_key",
-    "session_key",
-    "event_key",
-    # Parsing: records -> profile
-    "extract_profile",
-    # Parsing: whitespace
-    "collapse_ws",
-    "strip_ws",
-    # Parsing: signatures / names
-    "extract_tool_names",
+    # Canonical units equality / Jaccard are taken over
     "tool_signature",
     "tool_args_signature",
-    "response_signature",
     "tool_kv_set",
-    # Level 2: Profile comparison
+    "response_signature",
+    # Level 2: Profile extraction and comparison
+    "extract_profile",
     "compare_profiles",
     "compare_response_lists",
     "compare_session_depths",
@@ -119,4 +113,18 @@ __all__ = [
     "global_alignment_kernel",
     "action_histogram",
     "js_divergence",
+    # Reliability: Consistency (C) metrics (session-level replay port of hal-harness)
+    "SessionRun",
+    "SessionMetrics",
+    "session_success",
+    "summarize_session_run",
+    "load_session_runs",
+    "compute_outcome_consistency",
+    "compute_trajectory_consistency",
+    "compute_resource_consistency",
+    "seq_levenshtein_similarity",
+    "weighted_r_con",
+    "compute_session_metrics",
+    "aggregate_consistency",
+    "compute_consistency",
 ]

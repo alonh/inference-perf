@@ -203,8 +203,13 @@ const CLUSTER_COLORS = ['#6ea8fe','#3ddc84','#ffcf5c','#ff6b6b','#c9a6ff','#4dd0
 function cc(i){return CLUSTER_COLORS[i % CLUSTER_COLORS.length];}
 
 // Paper + output metrics: labels, canonical order (cards / picker / heatmap), and a short
-// gloss. All seven are similarities in [0,1] where higher = more consistent, so the pill
+// gloss. All are similarities in [0,1] where higher = more consistent, so the pill
 // coloring uses pillClass(v, goodHigh=true) uniformly.
+//
+// In the Papers panel these carry SESSION scope: the tool metrics compare two runs' whole
+// action sequences for one session and the output metrics are per-event means within it. In
+// the diff panel they are still per-turn (one call position), which is the right granularity
+// there. Anything absent from a JSON is simply skipped, so the panel tolerates older files.
 const METRIC_LABELS = {
   output_exact_match: 'Exact match',
   output_levenshtein: 'Content similarity',
@@ -213,8 +218,9 @@ const METRIC_LABELS = {
   ac: 'AC (arguments)',
   js_kernel: 'JS kernel',
   gak: 'GAK (ordering)',
+  trajectory_exact_match: 'Trajectory identical',
 };
-const METRIC_ORDER = ['output_exact_match','output_levenshtein','output_jaccard','tss','ac','js_kernel','gak'];
+const METRIC_ORDER = ['output_exact_match','output_levenshtein','output_jaccard','tss','ac','js_kernel','gak','trajectory_exact_match'];
 const METRIC_GLOSS = {
   output_exact_match: 'content + tool-args byte-identical',
   output_levenshtein: 'graded text similarity (difflib)',
@@ -223,6 +229,7 @@ const METRIC_GLOSS = {
   ac: 'argument agreement (n/a if no tool call)',
   js_kernel: 'action composition (which tools)',
   gak: 'action ordering (what order)',
+  trajectory_exact_match: 'the two runs took the exact same action sequence',
 };
 
 let state = {trace:'__ALL__', group:null, selA:null, selB:null,
@@ -714,11 +721,16 @@ function renderPapers(){
 
   // --- stat cards ---
   html += '<div class="dash">';
+  // What counts as an "instance" is scope-dependent — a session in the current JSON, an
+  // event_id in pre-session-scope files. Name it from the data instead of hardcoding it, so
+  // the card can't claim 89 independent instances when there are 10 sessions.
+  const instLabel = (o, n) => `${n||0} ${(o&&o.scope==='session')?'session':'instance'}${(n===1)?'':'s'}`;
   if(u){
     html += `<div class="card"><h3>U-statistic θ <span class="mut">(Raj et&nbsp;al.)</span></h3>
       <div class="big">${u.theta!=null?u.theta.toFixed(3):'–'}</div>
       <div class="mut">95% CI [${u.ci_low!=null?u.ci_low.toFixed(3):'–'}, ${u.ci_high!=null?u.ci_high.toFixed(3):'–'}]</div>
-      <div class="mut">kernel: ${esc(u.kernel||'?')} · ${u.n_instances||0} instances</div></div>`;
+      <div class="mut">kernel: ${esc(u.kernel||'?')} · ${instLabel(u, u.n_instances)}</div>
+      ${u.instance?`<div class="mut">instance: ${esc(u.instance)}</div>`:''}</div>`;
   }
   if(traj){
     const tcard = (t, title, sub) => {
@@ -728,16 +740,22 @@ function renderPapers(){
       return `<div class="card"><h3>${title} <span class="mut">(Raj — trajectory)</span></h3>
         <div class="big">${th}</div>
         <div class="mut">${esc(ci)}</div>
-        <div class="mut">${esc(sub)} · ${t.n_instances||0} instances</div></div>`;
+        <div class="mut">${esc(sub)} · ${instLabel(t, t.n_instances)}</div></div>`;
     };
     html += tcard(traj.js,  'Trajectory θ — composition', 'JS kernel over action histograms');
     html += tcard(traj.gak, 'Trajectory θ — ordering',    'Global Alignment Kernel over tool order');
   }
   if(h1){
     const ok = h1.supports_h1;
+    // How many individual sessions show the gap is the stronger claim than one pooled mean —
+    // and n_sessions counts only sessions where the gap is DEFINED (a session that never
+    // called a tool can neither support nor refute H1).
+    const bySess = (h1.n_sessions!=null)
+      ? `<div class="mut">${h1.n_supporting}/${h1.n_sessions} sessions individually</div>` : '';
     html += `<div class="card"><h3>Hypothesis&nbsp;1 <span class="mut">(Yagubyan)</span></h3>
       <div class="verdict ${ok?'ok':'no'}">${ok?'TSS ≫ AC — supported':'TSS ≈ AC — not supported'}</div>
       <div class="mut">mean TSS ${h1.mean_tss!=null?h1.mean_tss.toFixed(3):'–'} · mean AC ${h1.mean_ac!=null?h1.mean_ac.toFixed(3):'–'} · gap ${h1.gap!=null?h1.gap.toFixed(3):'–'}</div>
+      ${bySess}
       <div class="mut">structure stable, arguments vary</div></div>`;
   }
   // per-metric off-diagonal means
@@ -750,7 +768,8 @@ function renderPapers(){
   });
   html += `<div class="card"><h3>Mean pairwise agreement</h3>
     <table class="mmdtable">${cells}</table>
-    <div class="mut">averaged over all off-diagonal run pairs</div></div>`;
+    <div class="mut">averaged over all off-diagonal run pairs${
+      (rpm.scope==='session_mean_per_run_pair')?', each pair a mean over sessions':''}</div></div>`;
   html += '</div>';  // .dash
 
   // --- run×run heatmap ---

@@ -2,18 +2,26 @@
 
 ## Import
 
+Two imports: the general parsing layer is **outside** the library.
+
 ```python
-from compare import (
-    # Parsing / IO — the ONLY place records are read (parsing.py)
+# Parsing / IO — the ONLY place records are read. A sibling module of compare/, stdlib-only,
+# so a notebook that just wants a DataFrame never imports the comparison code.
+from replay_parsing import (
     find_run_dirs,
     load_records,             # one metrics file → List[dict]
     load_run,                 # one run_* dir → List[dict] (tolerant)
     parse_response,           # raw record → parsed response
     parse_records,            # List[dict] raw → List[dict] parsed
-    extract_profile,          # one run's raw records → profile dict
     request_key, session_key, event_key,
+    call_fields,              # one tool call → (name, raw arguments)
+    extract_tool_names,       # tool_calls → ordered names
+    collapse_ws, strip_ws,    # prose / structural whitespace normalization
+)
 
+from compare import (
     # Level 2: Full traces
+    extract_profile,          # one run's raw records → profile dict
     compare_profiles,
 
     # Level 1: Individual responses (PARSED input only)
@@ -24,8 +32,7 @@ from compare import (
     fast_content_ratio,       # approximate, for big run x run matrices
     jaccard,
 
-    # Tool-call names / signatures
-    extract_tool_names,
+    # Canonical units equality / Jaccard are taken over (signatures.py)
     tool_signature,           # (name, sorted arg KEYS)
     tool_args_signature,      # (name, canonical arg VALUES)
     response_signature,       # exact-match unit: content + tool args
@@ -46,7 +53,7 @@ from compare import (
 )
 ```
 
-> **Parse once, then compare.** `parsing.py` owns every read of a file or a raw record; the
+> **Parse once, then compare.** `replay_parsing` owns every read of a file or a raw record; the
 > comparators only compare. `compare_responses` and `response_signature` raise `ValueError`
 > on a dict with no `ok` key rather than parsing it for you, so call `parse_response` /
 > `parse_records` / `extract_profile` up front in your run script.
@@ -152,8 +159,11 @@ for i, (ra, rb) in enumerate(zip(responses_a, responses_b)):
 ## Notes
 
 - All metrics in [0, 1], where 1 = identical, 0 = completely different
-- Every comparison function is pure; only `parsing.py`'s `load_*` helpers touch the filesystem
+- Every comparison function is pure; only `replay_parsing`'s `load_*` helpers touch the filesystem
 - No external dependencies (standard library only)
+- Both bullets above hold for everything **except `reliability.py`**, which needs `numpy` and
+  drives its own loading (`compute_all(base)` / `load_session_runs(base)`); its metrics are
+  defined over all K runs of a session, not over a pair. See its docstring.
 - If either response errored (`ok=False`), every response metric is 0.0
 - See `README.md` for full documentation
 
@@ -161,13 +171,16 @@ for i, (ra, rb) in enumerate(zip(responses_a, responses_b)):
 
 | File | Purpose |
 |------|---------|
-| parsing.py | **The only parsing layer**: file IO, raw record → parsed, profiles, grouping keys, tool-call extraction, signatures |
+| *`../replay_parsing.py`* | **The only parsing layer** — outside this library: file IO, raw record → parsed, grouping keys, tool-call field access. Stdlib only; imports nothing from `compare/` |
+| signatures.py | The canonical units equality / Jaccard are taken over (`response_signature` & the `tool_*` signatures) |
 | response_similarity.py | Level 1: response comparison + the string / tool-call metrics |
-| traces_similarity.py | Level 2: profile comparison |
+| traces_similarity.py | Level 2: `extract_profile` + profile comparison |
 | kernels.py | Paper-grounded trajectory kernels (JS, GAK) |
-| compare_runs.py | CLI: compare two runs' metrics files — the only caller that parses |
+| reliability.py | hal-harness Consistency (C) metrics, session-level replay port |
 | __init__.py | Module exports |
-| test_compare.py | Unit tests |
+| test_compare.py | Unit tests (metrics); the parsing tests are in `../test_replay_parsing.py` |
+| test_reliability.py | Unit tests for the Consistency (C) metrics |
 | README.md | Full documentation |
 
-Dependency direction is one-way: `parsing` ← `response_similarity` ← `traces_similarity`.
+Dependency direction is one-way, with the general layer at the bottom:
+`replay_parsing` ← `signatures` ← `response_similarity` ← `traces_similarity`.

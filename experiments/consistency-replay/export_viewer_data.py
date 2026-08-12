@@ -36,35 +36,38 @@ import sys
 from collections import defaultdict
 from typing import Any, Dict, List
 
-# Parsing, grouping and metric primitives come straight from compare/ — the same definitions
-# the analyzers use, so the viewer's numbers match theirs exactly. Only `cv` below is
-# analyze_consistency's own aggregation helper.
+# Parsing and grouping come from replay_parsing, metric primitives from compare/ — the same
+# definitions the analyzers use, so the viewer's numbers match theirs exactly. Only `cv`
+# below is analyze_consistency's own aggregation helper.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import (  # noqa: E402
+from replay_parsing import (  # noqa: E402
     find_run_dirs,
     load_run,
     parse_response,
     request_key,
     session_key,
     event_key,
-    response_signature,
-    normalized_levenshtein,
-    jaccard,
     collapse_ws,
     strip_ws,
 )
-from analyze_consistency import cv  # noqa: E402
-
-# Paper-metric kernels (Yagubyan TSS/AC, Raj JS/GAK). Computed per run-pair per group so the
-# viewer can show them on a specific A-vs-B comparison at a specific call position — the
-# analyzer only stores run-level averages, which is the wrong granularity for the diff panel.
-from consistency_statistics import (  # noqa: E402
-    Feature,
+from compare import (  # noqa: E402
+    response_signature,
+    normalized_levenshtein,
+    jaccard,
+    # Paper-metric kernels (Yagubyan TSS/AC, Raj JS/GAK), taken from compare/ directly rather
+    # than re-exported through consistency_statistics: they are the same functions, and going
+    # to the source keeps the viewer independent of that module's scope refactors.
     tss,
     argument_consistency,
     js_kernel,
     global_alignment_kernel,
 )
+from analyze_consistency import cv  # noqa: E402
+
+# Feature is the parse-once cache, not a metric, so it still comes from the analysis module.
+# The diff panel needs these metrics per run-pair per GROUP (one call position), which is a
+# different granularity from the session-scope numbers consistency_statistics reports.
+from consistency_statistics import Feature  # noqa: E402
 
 
 def input_preview(record: dict) -> Dict[str, Any]:
@@ -220,7 +223,7 @@ def build() -> int:
         # Whitespace-collapsed so pure formatting differences (e.g. `{"content":` vs
         # `{ "content":`, or pretty-printed vs single-line JSON) don't count as distinct —
         # this drives the "N distinct" count, cluster coloring, and exact-match pill.
-        # response_signature (compare/parsing.py) is the shared definition; a version dict
+        # response_signature (compare/signatures.py) is the shared definition; a version dict
         # carries ok / content / tool_calls, and its flattened {"name", "arguments"} calls are
         # read directly by the tool-call extractor.
         sig = response_signature

@@ -21,10 +21,19 @@ interactive side-by-side HTML viewer.
 |---|---|
 | `config.yml` | Experiment config: model, exgentic HF dataset, `disable_output_substitution: true`, `num_sessions: 10`, `base_seed: 42`, `per_request: true`. Holds a **placeholder** API key. |
 | `run_consistency.sh` | Runs `config.yml` N times (independent processes) → `reports-consistency/run_<i>/`. Injects `RITS_API_KEY` from env. |
+| `replay_parsing.py` | The general parsing layer, stdlib-only: reads a report off disk, turns one raw record into a parsed response, derives its grouping keys. Computes no metric and imports nothing from `compare/`, so a notebook can use it alone. |
+| `compare/` | The comparison library: the canonical units equality is taken over (`signatures.py`), the per-pair metrics, the trace profile, and the trajectory kernels. Single source of truth for every metric definition. See `compare/README.md`. |
 | `analyze_consistency.py` | Groups results by (trace, identical-input); computes exact-match, Levenshtein/Jaccard, tool-call structure, and `--judge` LLM-judge semantic clusters. |
+| `consistency_statistics.py` | Pairwise aggregation, **within a session**: per-session U-statistic θ (instance = session, sample unit = run) with a delete-one-run jackknife CI, the equally-weighted session mean with a t-CI over sessions, run × run matrices, session-trajectory MMD, and the paper-grounded hypothesis checks. |
+| `extract_to_dataframe.py` | Flattens every run's records into one tidy row-per-call table (CSV / Parquet) for ad-hoc analysis. |
+| `find_metric_witnesses.py` | Per metric, finds a concrete run-pair whose difference *only* that metric captures — evidence each metric earns its place. |
 | `export_viewer_data.py` | Exports per-group texts + pairwise similarity matrices → `viewer_data.json`. |
 | `viewer_template.html` | The viewer UI (HTML/CSS/JS); data injected at build time. |
 | `build_viewer.py` | Runs the exporter, then injects JSON into the template → self-contained `consistency_viewer.html`. |
+| `build_metric_viewer.py` | Renders the witness table into a standalone per-metric example viewer. |
+| `reliability_metrics.py` | CLI over `compare.reliability`: the hal-harness Consistency (C) sub-metrics per session, aggregated across sessions. |
+| `reliability_analysis.ipynb` | Notebook walkthrough of the same C metrics, with the per-session breakdown. |
+| `test_replay_parsing.py` | Unit tests for the general parsing layer (the metric tests live in `compare/test_compare.py`). |
 | `FINDINGS.md` | Written-up results from the reference 10×10 run. |
 | `DESIGN.md` | Original design/rationale. |
 

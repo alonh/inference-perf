@@ -56,7 +56,7 @@ sys.path.insert(0, HERE)
 
 # Reuse the per-pair metric machinery (which imports compare/). Single source of truth.
 import find_metric_witnesses as fw  # noqa: E402
-from compare import extract_tool_names  # noqa: E402
+from replay_parsing import extract_tool_names  # noqa: E402
 
 TEMPLATE = os.path.join(HERE, "metric_viewer_template.html")
 

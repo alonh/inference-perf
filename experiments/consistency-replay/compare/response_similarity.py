@@ -8,18 +8,18 @@ All metrics are normalized to [0, 1]:
   - 0.5 = moderate similarity
 
 This module only COMPARES. It never reads a file and never parses a raw record: its inputs
-are already-parsed responses (parsing.parse_response) and the extracted tool-call structures
-that parsing.py produces. Hand it a raw record and it raises rather than quietly parsing —
-see parsing.require_parsed for why.
+are already-parsed responses (replay_parsing.parse_response) and the canonical tool-call units
+that signatures.py builds. Hand it a raw record and it raises rather than quietly parsing —
+see signatures.require_parsed for why.
 """
 
 import difflib
 from itertools import groupby
 from typing import AbstractSet, Dict, List, Optional, Sequence, Tuple
 
-from .parsing import (
-    collapse_ws,
-    extract_tool_names,
+from replay_parsing import collapse_ws, extract_tool_names
+
+from .signatures import (
     require_parsed,
     tool_args_signature,
     tool_kv_set,
