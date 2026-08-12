@@ -38,6 +38,14 @@ model in `inference-perf.yaml`: Qwen3-8B serves 32k tokens natively and 128k onl
 enabled. The example below assumes the 128k window and leaves headroom for the response;
 lower the cap to `< 28000` when serving at the native 32k.
 
+Each record also carries top-level scalar fields that act as cheap proxies for "how long/large
+is this trace" — useful for dropping oversized sessions without inspecting the full `spans`
+list: `steps` (agent step count), `total_tokens` (tokens summed across the session), and
+`execution_time` (recorded wall-clock seconds). Note they are only approximations of what
+actually runs — `steps` is not the number of spans or replayed LLM calls, and `execution_time`
+is the original recorded duration, not the replayed one (inter-call gaps are capped by
+`max_wait_ms`). Use them to bound trace size, not to predict exact replay behavior.
+
 ```yaml
 data:
   type: otel_trace_replay
@@ -45,6 +53,10 @@ data:
     hf_dataset_path: Exgentic/agent-llm-traces-v2
     # Keep only sessions whose largest call fits the served context window
     filter: "lambda x: x.get('max_tokens', 0) < 120000"
+    # Or drop long/large traces using top-level scalar proxies:
+    # filter: "lambda x: x.get('steps', 0) < 50"
+    # filter: "lambda x: x.get('total_tokens', 0) < 500000"
+    # filter: "lambda x: x.get('execution_time', 0) < 600"
     # Or narrow to a single benchmark:
     # filter: "lambda x: x['benchmark'] == 'tau2_retail'"
 ```
