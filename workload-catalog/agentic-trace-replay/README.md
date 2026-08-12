@@ -10,7 +10,7 @@ This workload replays real OpenTelemetry traces from agentic systems. Each sessi
 - **Number of Turns**: Sessions range from 1 to 300 calls per session, with a mean of 22 turns. The distribution is highly variable across different agent harnesses and benchmarks.
 - **Shared Prefix**: 92.0% of calls share prefix with predecessors, averaging 44.6k cacheable tokens per call — massive KV cache hit opportunity. The remaining 8.0% are mostly first calls in sessions (4.57%) plus truly independent calls (3.40%).
 - **Tool Usage**: 65.9% of sessions use tools, with 61.7% of all calls being tool calls. Tool definitions are present in 76.5% of sessions.
-- **Session Duration**: Average 406 seconds (~6.8 minutes), with high variability (std dev: 998 seconds). Some sessions complete in under a second while others run over 2 hours.
+- **Session Duration**: Average 406 seconds (~6.8 minutes) with high variability (std dev: 998 seconds); most sessions fall well below the mean, which a few long-running ones pull up. These are *recorded* durations — at replay time, long inter-call gaps are capped by `max_wait_ms` (default 15s), so sessions may run faster.
 
 ## 2. Reference Datasets
 - **[Exgentic agent-llm-traces-v2](https://huggingface.co/datasets/Exgentic/agent-llm-traces-v2)**: 10,056 OpenTelemetry traces across six benchmarks (AppWorld, BrowseCompPlus, SWE-bench, TAU2 Airline/Retail/Telecom), five frontier models, and five agent harnesses (Claude Code, OpenAI solo, tool-calling, tool-calling with shortlisting, smolagents code).
