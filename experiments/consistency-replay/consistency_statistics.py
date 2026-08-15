@@ -73,8 +73,10 @@ Usage:
       [--kernel exact|levenshtein|judge] [--alpha 0.05] [--perm 0] [--seed 41] \
       [--judge] [--out analysis_papers.json]
 
-A single bare positional DIR is accepted as `--condition default=DIR`. Each DIR is
-scanned for run_* subdirectories, exactly like analyze_consistency.py.
+A single bare positional DIR is accepted as `--condition default=DIR`. Each DIR is an
+experiment directory — `<base>/sessions/<session_id>/run_<i>/` — read via
+`replay_parsing.iter_sessions`, so a condition arrives already grouped by session and this
+module never does its own layout walk.
 """
 from __future__ import annotations
 
@@ -97,11 +99,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 # resolve regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay_parsing import (  # noqa: E402
-    find_run_dirs,
-    load_run,
+    Session,
+    iter_sessions,
     parse_response,
-    event_key,
-    session_key,
     extract_tool_names,
 )
 from compare import (  # noqa: E402
@@ -246,52 +246,75 @@ SessionMap = Dict[str, Dict[str, SessionRun]]  # session_id -> {run_id: SessionR
 
 
 class Condition:
-    """One labelled condition, in both views the analysis needs.
+    """One labelled condition: its sessions, and the run ids they were replayed under.
 
-    runs:     {run_id: {event_id: Feature}} — the flat, event-scope view.
     sessions: {session_id: {run_id: SessionRun}} — the session-scope view that every
               paper-grounded quantity is computed over.
+    run_ids:  the union of run ids across sessions, in run order. Only an AXIS — the labels
+              the R x R matrices are indexed by. There is deliberately no merged
+              {run_id: all events of that run} view: a run id means "the i-th replay", and
+              the i-th replay of session A shares nothing with the i-th replay of session B
+              beyond the ordinal, so merging their events would invite exactly the
+              cross-session pooling the module's SCOPE note rules out. The one quantity that
+              genuinely wants that pool builds it explicitly, and says so
+              (:func:`pooled_event_groups`).
     """
 
-    __slots__ = ("name", "base_dir", "runs", "sessions")
+    __slots__ = ("name", "base_dir", "sessions", "run_ids")
 
-    def __init__(self, name: str, base_dir: str, runs: Dict[str, RunMap], sessions: SessionMap):
+    def __init__(self, name: str, base_dir: str, sessions: SessionMap, run_ids: Sequence[str]):
         self.name = name
         self.base_dir = base_dir
-        self.runs = runs
         self.sessions = sessions
+        self.run_ids: Tuple[str, ...] = tuple(run_ids)
 
 
 def load_condition(base_dir: str, name: str = "default") -> Condition:
-    """Load one condition from a dir of run_* subdirs, in both views.
+    """Load one condition from an experiment directory, session by session.
 
-    run_id is the run_* directory name. event_id is stable across runs for a given
-    (session, call-position), so the same key in two runs was fed byte-identical input;
-    session_id groups a trace's events into the episode they belong to.
+    The layout read and the per-session (event, run) table come from
+    :func:`replay_parsing.iter_sessions`; ``Feature`` is the per-record transform, so each
+    record is parsed exactly once and every run pair below reads cached fields.
+
+    A session_id is the ``sessions/<id>`` directory name and a run_id is its ``run_<i>``
+    subdirectory. An event key is stable across runs for a given (session, call-position), so
+    the same key in two runs was fed byte-identical input — that is what makes a run pair
+    comparable at all.
     """
-    runs: Dict[str, RunMap] = {}
-    by_session: Dict[Tuple[str, str], Dict[str, Feature]] = defaultdict(dict)
+    sessions: SessionMap = {}
+    run_ids: List[str] = []
+    for session in iter_sessions(base_dir, Feature):
+        by_run = {
+            run_id: SessionRun(session.session_id, run_id, features)
+            for run_id, features in session.by_run().items()
+        }
+        sessions[session.session_id] = by_run
+        # Union in first-seen order, which is per-session run order (run_1 .. run_10,
+        # numerically), so the matrix axes read in replay order rather than lexicographically.
+        for run_id in session.runs:
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+    return Condition(name, base_dir, sessions, run_ids)
 
-    for rd in find_run_dirs(base_dir):
-        run_id = os.path.basename(rd)
-        rm: RunMap = {}
-        for rec in load_run(rd):
-            key = event_key(rec)
-            # A run should hit each identical input once; if a session re-issues the exact
-            # same payload we keep the first (deterministic, order-stable).
-            if key in rm:
-                continue
-            feat = Feature(rec)
-            rm[key] = feat
-            by_session[(session_key(rec), run_id)][key] = feat
-        if rm:
-            runs[run_id] = rm
 
-    sessions: SessionMap = defaultdict(dict)
-    for (sid, run_id), feats in by_session.items():
-        if run_id in runs:
-            sessions[sid][run_id] = SessionRun(sid, run_id, feats)
-    return Condition(name, base_dir, runs, dict(sessions))
+def pooled_event_groups(cond: Condition) -> Dict[str, List[Feature]]:
+    """{event key: usable Features across runs}, POOLED OVER ALL SESSIONS.
+
+    The one deliberate exception to the module's within-a-session scope, and the reason it is
+    a named function rather than an inline regroup: the event-scope U-statistic's instance is
+    "one identical input", and every event of every session is such an input. So this mixes
+    sessions on purpose, and the number it feeds
+    (:func:`u_statistic`) is reported as an explicitly event-scoped contrast to the headline —
+    not as an alternative estimate of it. Its instances are not independent (the events of one
+    session share a task and a prefix), which is exactly why it is not the headline.
+    """
+    groups: Dict[str, List[Feature]] = defaultdict(list)
+    for by_run in cond.sessions.values():
+        for sr in by_run.values():
+            for key, feat in sr.features.items():
+                if feat.ok:
+                    groups[key].append(feat)
+    return dict(groups)
 
 
 # The kernels (js_divergence, action_histogram, js_kernel, global_alignment_kernel) and the
@@ -558,12 +581,23 @@ def session_analysis(
     step_counts = {r: len(by_run[r].steps) for r in run_ids}
     modal_events = Counter(event_counts.values()).most_common(1)[0] if event_counts else (0, 0)
 
+    # The session's event axis is the UNION over its runs, so a run that stopped early is a
+    # set of holes in the (event, run) table rather than a shorter axis. Counting the holes
+    # says how ragged this session is directly; event_count_agreement below says the same
+    # thing as a share of runs, and is kept because it is what the report prints.
+    union = set().union(*(sr.features.keys() for sr in by_run.values())) if by_run else set()
+    n_missing = sum(len(union) - by_run[r].n_events for r in run_ids)
+
     base: Dict[str, Any] = {
         "session_id": session_id,
         "n_runs": n,
         "run_ids": run_ids,
         "n_events": event_counts,
         "n_steps": step_counts,
+        # Every event any run of this session reached, and how many (event, run) cells no
+        # response was recorded for. 0 means every run replayed the whole session.
+        "n_events_union": len(union),
+        "n_missing_event_runs": n_missing,
         # Did every run of this session replay the same number of turns? A run that dropped
         # turns is not comparable on equal footing, and silently averaging it in would hide
         # exactly the failure the experiment is meant to surface.
@@ -811,32 +845,27 @@ def output_kernel(fa: "Feature", fb: "Feature", kind: str) -> Optional[float]:
 
 
 def u_statistic(
-    runs: Dict[str, RunMap],
+    per_key: Dict[str, List["Feature"]],
     kind: str,
     alpha: float,
     judge_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """EVENT-SCOPE consistency U-statistic theta with a t-based CI (Raj et al.).
 
-    Each INSTANCE is one event_id — one identical input. For that input we take the outputs
-    from every run and form U_n = C(n,2)^-1 * sum_{i<j} k(y_i, y_j) — the mean pairwise
-    kernel. Then across the M instances we report the mean Ubar, sample stdev, and the t-CI
+    Each INSTANCE is one event key — one identical input — and `per_key` maps it to that
+    input's usable outputs across runs, as built by :func:`pooled_event_groups`. For one input
+    we form U_n = C(n,2)^-1 * sum_{i<j} k(y_i, y_j) — the mean pairwise kernel. Then across the
+    M instances we report the mean Ubar, sample stdev, and the t-CI
     Ubar +/- t_{M-1,1-alpha/2} * sigma_hat / sqrt(M).
 
-    This is a legitimate quantity — "given the same prompt, how repeatable is one turn?" —
-    but it is NOT the session-level consistency the papers' hypotheses are about, and its M
-    instances are not independent (the events of one session share a task and a prefix). It
-    is kept as a separate, explicitly event-scoped number; `session_u_statistic` is the
-    headline one. It is also where the LLM-judge clustering lives, since the judge clusters
-    the repeated outputs of a single identical input.
+    Taking the pool as an ARGUMENT rather than building it from a condition is the point: the
+    caller has to name the pooling, so this function cannot quietly become the headline. It is
+    a legitimate quantity — "given the same prompt, how repeatable is one turn?" — but it is
+    NOT the session-level consistency the papers' hypotheses are about, and its M instances are
+    not independent (the events of one session share a task and a prefix).
+    `session_u_statistic` is the headline one. This is also where the LLM-judge clustering
+    lives, since the judge clusters the repeated outputs of a single identical input.
     """
-    # Gather, per instance key, the list of usable Features across runs.
-    per_key: Dict[Tuple[str, str], List["Feature"]] = defaultdict(list)
-    for rm in runs.values():
-        for key, feat in rm.items():
-            if feat.ok:
-                per_key[key].append(feat)
-
     # The judge kernel needs the group's raw contents; it clusters once per divergent
     # group and reports the cluster count, while the U-statistic pair values fall back to
     # exact-match agreement (the judge gives counts, not pairwise assignments).
@@ -1344,14 +1373,19 @@ def main() -> int:
 
     conditions: Dict[str, Condition] = {}
     for name, d in conds.items():
-        cond = load_condition(d, name)
-        if not cond.runs:
-            print(f"warning: condition {name!r} ({d}) has no usable run_* dirs — skipping",
+        try:
+            cond = load_condition(d, name)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"warning: condition {name!r} ({d}) not analyzable — skipping: {e}",
+                  file=sys.stderr)
+            continue
+        if not cond.sessions:
+            print(f"warning: condition {name!r} ({d}) has no usable sessions — skipping",
                   file=sys.stderr)
             continue
         conditions[name] = cond
-        print(f"Loaded condition {name!r}: {len(cond.runs)} runs, "
-              f"{len(cond.sessions)} sessions from {d}")
+        print(f"Loaded condition {name!r}: {len(cond.sessions)} sessions x "
+              f"{len(cond.run_ids)} runs from {d}")
 
     if not conditions:
         print("error: no conditions had usable data.", file=sys.stderr)
@@ -1364,12 +1398,15 @@ def main() -> int:
         sess = per_session_analysis(cond, args.alpha)
         analysis["conditions"][name] = {
             "per_session": sess,
-            "run_pair_matrix": run_pair_matrix(sess["sessions"], sorted(cond.runs)),
+            "run_pair_matrix": run_pair_matrix(sess["sessions"], cond.run_ids),
             "u_statistic": session_u_statistic(cond, kernel, args.alpha),
             "trajectory_u_statistic": trajectory_u_statistic(sess["sessions"], args.alpha),
             "h1": h1_check(sess),
-            # A different, explicitly event-scoped question — and where the judge lives.
-            "event_u_statistic": u_statistic(cond.runs, kernel, args.alpha, judge_cfg),
+            # A different, explicitly event-scoped question — and where the judge lives. The
+            # pooling across sessions is named at the call site on purpose.
+            "event_u_statistic": u_statistic(
+                pooled_event_groups(cond), kernel, args.alpha, judge_cfg
+            ),
         }
 
     if len(conditions) >= 2:

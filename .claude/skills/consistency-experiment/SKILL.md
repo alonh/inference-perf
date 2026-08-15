@@ -31,7 +31,10 @@ not compounding cascade drift. Without the flag you'd measure input divergence i
 | File | Role |
 |---|---|
 | `experiments/consistency-replay/config.yml` | The experiment config (placeholder API key) |
-| `experiments/consistency-replay/run_consistency.sh` | Runs the config N times, one report dir per run; injects `$RITS_API_KEY` |
+| `experiments/consistency-replay/run_experiment.sh` | **The runner.** Model + benchmark on the command line; replays a named session set N times each, one process per (session, repetition) cell. `new` / `continue` modes; injects `$RITS_API_KEY` |
+| `experiments/consistency-replay/list_sessions.py` | Names which sessions to replay (seeded shuffle or explicit ids) → the append-only `sessions.json` ledger |
+| `experiments/consistency-replay/migrate_to_session_major.py` | Converts an old run-major results dir to session-major, into a new dir (source read-only) |
+| `experiments/consistency-replay/run_consistency.sh` | Older fixed-config runner: runs `config.yml` N times, one report dir per run (run-major) |
 | `experiments/consistency-replay/analyze_consistency.py` | Groups by (trace, identical-input) and computes metrics |
 | `experiments/consistency-replay/consistency_statistics.py` | Paper-grounded metrics: Yagubyan TSS/AC + Hypothesis 1; Raj U-statistic θ+CI; run×run matrices; cross-condition MMD |
 | `experiments/consistency-replay/export_viewer_data.py` | Exports per-group data (texts + pairwise matrices) for the viewer |
@@ -39,7 +42,19 @@ not compounding cascade drift. Without the flag you'd measure input divergence i
 | `experiments/consistency-replay/build_viewer.py` | Export + inject → single self-contained HTML |
 | `experiments/consistency-replay/README.md` | Human-facing quick start |
 
-Results land in `reports-consistency/` (run dirs, `analysis.json`, `consistency_viewer.html`).
+Results land in `reports-consistency/`. Two layouts exist:
+
+- **session-major** (`run_experiment.sh`, current) —
+  `<benchmark>/<model>/<stamp>/sessions/<session_id>/run_<i>/`, plus `sessions.json`,
+  `experiment.json`, `coverage.json`.
+- **run-major** (`run_consistency.sh`, and everything collected before 2026-08-12) —
+  `run_<i>/` each holding all ten sessions interleaved.
+
+**The analysis steps below only understand run-major** (`replay_parsing.find_run_dirs` globs
+`<base>/run_*`). On a session-major directory `analyze_consistency.py` exits non-zero with
+"No run_* directories found" — it does not silently produce an empty analysis. Until the
+finder is updated, either analyze a run-major directory or convert one with
+`migrate_to_session_major.py`.
 
 ## Procedure
 
@@ -73,20 +88,53 @@ If it prints `DOWN`, do not launch the runs — either wait/retry, or switch the
 (see "Adapting" below). A single-run smoke test (`--storage.local_storage.path reports-consistency/smoke`)
 before the full N is a good idea; expect a small fraction of transient 502/504s even when up.
 
-### Step 1 — Run N times (default 10)
+### Step 1 — Replay each session N times (default 10 sessions × 10 repetitions)
 
 ```bash
-rm -rf reports-consistency/run_* reports-consistency/logs
-bash experiments/consistency-replay/run_consistency.sh 10
+# Cheapest end-to-end check first: one session, two repetitions.
+N_SESSIONS=1 experiments/consistency-replay/run_experiment.sh new \
+    Qwen/Qwen3-VL-235B-A22B-Instruct tau2_airline 2
+
+# Then the full grid.
+experiments/consistency-replay/run_experiment.sh new \
+    Qwen/Qwen3-VL-235B-A22B-Instruct tau2_airline 10
 ```
 
-Each iteration is an **independent process** writing `reports-consistency/run_<i>/`.
-The config fixes `base_seed: 42` and uses `num_sessions: 10`, so every run replays the
-**same** first 10 traces. Per-run record counts vary (a 504 on an early turn cancels the
-rest of that session chain) — this is expected and handled by the analyzer.
+Each **cell** = one independent process replaying **one** session
+(`concurrent_sessions: 1`, `num_sessions: 1`, session pinned by the replay filter) into
+`sessions/<session_id>/run_<i>/`. The session set is chosen by `list_sessions.py` — the first
+`N_SESSIONS` (10) after a `SESSION_SEED` (41) shuffle, which reproduces the exact sessions the
+older run-major corpora replayed — and recorded in `sessions.json`.
 
-Long-running; run in the background and monitor `reports-consistency/runner.log` for
-`Run i/10` / `OK (rc=0)` / `Done. ok= fail=`.
+Env knobs: `N_SESSIONS`, `SESSION_SEED`, `SESSION_IDS` (explicit ids, overriding both),
+`PARALLEL_REPS` (10 — how many repetitions of the *same* session run at once; matches the
+`concurrent_sessions: 10` of the run-major config, so request concurrency at the endpoint is
+unchanged. Each cell is pinned to `num_workers: 1`, so the process count tracks the cell count.
+Set to 1 for a strictly sequential run), `REQUEST_TIMEOUT` (1200), `RUN_ANALYSIS` (0).
+
+Per-cell record counts vary (a 504 on an early turn cancels the rest of that session chain) —
+expected and handled by the analyzer. A failure now costs **one cell**, not all ten sessions.
+Read the `coverage.json` / printed grid at the end to see exactly which cells are missing,
+then fill them in:
+
+```bash
+experiments/consistency-replay/run_experiment.sh continue <OUT_BASE> 10
+```
+
+`continue` re-runs only missing or unfinished cells (wiping a partial cell dir first), leaves
+complete ones untouched, and never re-queries HuggingFace. To **add a session** to a finished
+experiment — appends to the ledger and runs only that session's cells, touching no existing
+file:
+
+```bash
+SESSION_IDS=<session_id> experiments/consistency-replay/run_experiment.sh continue <OUT_BASE> 10
+```
+
+Long-running; run in the background and monitor the per-cell logs under
+`<OUT_BASE>/logs/<session_id>/run_<i>.log`.
+
+**Do not delete anything to "start clean."** Every `new` invocation gets a fresh timestamped
+directory, so previous experiments are never overwritten.
 
 ### Step 2 — Analyze (offline metrics + LLM-judge semantic clustering)
 
@@ -222,23 +270,47 @@ condition — no perturbation set needed, per Assumption 1's `x_mi = x_m0`).
 
 ## Adapting the experiment
 
-- **Different model/endpoint:** edit `server.base_url`, `server.model_name`, and
-  `static_model_name` in the config; update the judge endpoint in
-  `analyze_consistency.py` (`judge_cfg`) and the probe URL in step 0. Confirm the RITS
-  slug with `/v1/models` or a chat probe first (guessing slugs returns immediate 404).
-- **More/fewer traces:** change `num_sessions` in the config's load stage.
-- **More/fewer repetitions:** pass a different N to `run_consistency.sh` (e.g. `20`).
+- **Different model/endpoint:** pass the model as `run_experiment.sh`'s first argument and add
+  its RITS slug to the `model_base_url()` table in that script — the config needs no edit.
+  Update the judge endpoint in `analyze_consistency.py` (`judge_cfg`) and the probe URL in
+  step 0. Confirm the RITS slug with `/v1/models` or a chat probe first (guessing slugs
+  returns immediate 404).
+- **Different benchmark:** `run_experiment.sh`'s second argument. One of `tau2_retail`,
+  `appworld`, `swebench`, `tau2_airline`, `tau2_telecom`, `browsecompplus` — the dataset is a
+  single corpus with a `benchmark` column, so this sets a filter, not a different dataset.
+- **More/fewer sessions:** `N_SESSIONS`, or `SESSION_IDS` to name them exactly. Browse
+  candidates with `list_sessions.py <BENCHMARK>` (prints a table; writes nothing).
+- **More/fewer repetitions:** `run_experiment.sh`'s third positional argument (e.g. `20`).
 - **A specific trace file instead of the HF dataset:** set `trace_files: [...]` and
   remove `hf_dataset_path` in the config's `otel_trace_replay` block.
 - **Determinism floor:** to isolate numerical nondeterminism from sampling, force
   `temperature: 0` (server default is >0). The config doesn't expose a temperature knob
   today — would need adding, or set it at the server.
 
-## Known caveat
+## Known caveats
 
-The trace-replay generator currently leaves `session_id` **null** on per-request metrics
-(in `inference_perf/datagen/replay_graph_session_datagen.py`, the built
-`SessionChatCompletionAPIData` is passed the lazy stub's `None` instead of the locally
-extracted session id). The analyzer works around this via `trace_key()` (hash of the
-request's leading message), which can split one dataset session into two trace-ids —
-harmless, since groups still join on the exact request hash.
+**Recorded ids embed the replaying process's slot, so they differ between layouts.** Records
+carry `session_id` / `event_id` and `replay_parsing.session_key` reads them directly (the
+leading-message hash is only a fallback for old metrics that lack the field). A run-major run
+of ten sessions produced `trace0_…`–`trace9_…`; a session-major cell replays one session in
+slot 0 and always records `trace0_<dataset_session_id>`. **Join across layouts on the
+`sessions/<session_id>` directory name** (the bare dataset id in both) or on `sessions.json`'s
+`trace_id` — never on the recorded id.
+
+**`concurrent_sessions: 1` changes what is measured.** Session-major runs put one session in
+flight per process, so cross-session batching interference — present in every corpus collected
+before 2026-08-12, including the numbers in `FINDINGS.md` — is no longer part of the
+phenomenon. Note this when comparing new results against old.
+
+**The harness wrote the resolved API key to disk in two places — redacted at the source since
+2026-08-12.** Each run's `config.yaml` (`reportgen/base.py` `generate_config_report` →
+`client/filestorage/local.py:37-39`) and the captured stdout log (`config/config.py` logs the
+whole merged config at startup) both now pass through `config.redact_secrets`, which masks every
+`headers` value plus any `api_key`/`token`/`secret`/`password`/`authorization`/`credential`
+field. Header names survive; the live `Config` is unaffected.
+
+**Runs from before that fix still hold plaintext keys** under git-ignored `reports-*/`. Sweep any
+older corpus with
+`grep -rl '<key>' reports-consistency | xargs sed -i '' 's/<key>/***REDACTED***/g'`,
+and if a key ever reached those files, treat it as exposed and rotate it — scrubbing the copies
+does not un-expose a key that was also committed or shared.

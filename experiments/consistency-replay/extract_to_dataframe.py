@@ -39,7 +39,9 @@ Usage
   # Parquet (recommended for large datasets)
   python extract_to_dataframe.py <run_base_dir> --format parquet --out results.parquet
 
-<run_base_dir> is scanned for run_* subdirectories, exactly like analyze_consistency.py.
+<run_base_dir> is an experiment directory holding sessions/<session_id>/run_<i>/, exactly like
+analyze_consistency.py. Rows are built one session at a time (`session_rows`) and concatenated
+(`combine_rows`), so no column depends on which other sessions were on disk.
 
 Output columns
 --------------
@@ -49,10 +51,12 @@ onto an analyzer group:
   run_id              : str  — "run_1" … "run_N". The only run-resolved column; the analyzer
                                is deliberately run-anonymous, so this is what lets you see a
                                single run's behaviour instead of the across-run roll-up.
-  session_id          : str  — one source trace (compare.session_key). Every call position in
-                               that trace shares it. Falls back to a hash of the session's
-                               anchor message only for old metrics files that never
-                               populated it.
+  session_id          : str  — one source trace: the session DIRECTORY name, i.e. the bare
+                               dataset session id. Every call position in that trace shares it.
+                               Note this is the directory, not the recorded session_id
+                               ("trace<k>_<id>"), whose slot prefix depends on how the replay
+                               was scheduled — the directory name is the stable identity, and
+                               it is the same key analyze_consistency.py reports per trace.
   event_id            : str  — ONE identical-input call position (compare.event_key), of the
                                form "<session_id>:event_<NNN>_<hash>". Because the experiment
                                runs with disable_output_substitution=true, all N runs feed
@@ -172,7 +176,6 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -190,13 +193,12 @@ except ImportError:
 # compare/, which is the single definition of what counts as "the same response".
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay_parsing import (  # noqa: E402
+    METRICS_FILE,
+    Session,
+    analyze,
     collapse_ws,
-    event_key,
     extract_tool_names,
-    find_run_dirs,
-    load_run,
     parse_response,
-    session_key,
 )
 from compare import (  # noqa: E402
     response_signature,
@@ -300,106 +302,114 @@ def _last_tool_name(messages: List[dict]) -> Optional[str]:
 # Main extraction
 # ---------------------------------------------------------------------------
 
-def extract_records(run_dirs: List[str], include_text: bool) -> List[Dict[str, Any]]:
-    """Load all run dirs and return a list of flat row dicts."""
+def session_rows(session: Session, include_text: bool = False) -> List[Dict[str, Any]]:
+    """Stage 1: flatten ONE session's runs into rows — one row per (event, run).
+
+    `session.by_run()` is the (event, run) table read run-major, so each inner loop is one
+    replay of this session and `run_id` stays the repetition index shared across sessions.
+    A run that stopped early simply contributes fewer rows.
+
+    `session_type` / `task` are read off the first call of each run, which is where the system
+    message lives; they are properties of the session, so every run agrees on them.
+    """
 
     all_rows: List[Dict[str, Any]] = []
+    sid = session.session_id
 
-    for run_dir in run_dirs:
-        run_id = os.path.basename(run_dir)
-        records = load_run(run_dir)
-        if not records:
+    for run_id, events in session.by_run().items():
+        if not events:
             continue
 
-        # Group records by session (session_key) within this run.
-        session_records: Dict[str, List[dict]] = defaultdict(list)
-        for rec in records:
-            sid = session_key(rec)
-            session_records[sid].append(rec)
+        # Chronological within the run, so recs_sorted[0] is the call that carries the
+        # system message (session_type / task are read off it below). Sorting the (event, rec)
+        # pairs keeps each row's event_id straight off the table rather than re-derived.
+        recs_sorted = sorted(events.items(), key=lambda kv: kv[1].get("start_time") or 0.0)
 
-        # ---- build one row per record ----------------------------------------
-        for sid, recs in session_records.items():
-            # Chronological within the session, so recs_sorted[0] is the call that carries the
-            # system message (session_type / task are read off it below).
-            recs_sorted = sorted(recs, key=lambda r: r.get("start_time", 0.0))
+        # Determine session_type and task from the first record's request.
+        first_req = _parse_request(recs_sorted[0][1].get("request"))
+        first_msgs: List[dict] = first_req.get("messages") or []
+        sys_msg = next((m for m in first_msgs if m.get("role") == "system"), None)
+        if sys_msg:
+            session_type = "user_simulator"
+            sys_content = sys_msg.get("content") or ""
+            task = _extract_scenario(sys_content)
+        else:
+            session_type = "agent"
+            task = None
 
-            # Determine session_type and task from the first record's request.
-            first_req = _parse_request(recs_sorted[0].get("request"))
-            first_msgs: List[dict] = first_req.get("messages") or []
-            sys_msg = next((m for m in first_msgs if m.get("role") == "system"), None)
-            if sys_msg:
-                session_type = "user_simulator"
-                sys_content = sys_msg.get("content") or ""
-                task = _extract_scenario(sys_content)
-            else:
-                session_type = "agent"
-                task = None
+        for eid, rec in recs_sorted:
+            req_obj = _parse_request(rec.get("request"))
+            messages: List[dict] = req_obj.get("messages") or []
+            tools: List[dict] = req_obj.get("tools") or []
 
-            for rec in recs_sorted:
-                eid = event_key(rec)
-                req_obj = _parse_request(rec.get("request"))
-                messages: List[dict] = req_obj.get("messages") or []
-                tools: List[dict] = req_obj.get("tools") or []
+            # parse_response takes the whole record: it reads the record-level error
+            # block itself (short-circuiting before the body) and the record-level
+            # timing, so there is nothing left to override here.
+            resp = parse_response(rec)
 
-                # parse_response takes the whole record: it reads the record-level error
-                # block itself (short-circuiting before the body) and the record-level
-                # timing, so there is nothing left to override here.
-                resp = parse_response(rec)
+            tool_calls: List[dict] = resp["tool_calls"]
+            names = extract_tool_names(tool_calls)
 
-                tool_calls: List[dict] = resp["tool_calls"]
-                names = extract_tool_names(tool_calls)
+            last_msg = messages[-1] if messages else {}
+            last_role = last_msg.get("role")
+            last_content = last_msg.get("content") or ""
+            if not isinstance(last_content, str):
+                last_content = json.dumps(last_content, ensure_ascii=False)
 
-                last_msg = messages[-1] if messages else {}
-                last_role = last_msg.get("role")
-                last_content = last_msg.get("content") or ""
-                if not isinstance(last_content, str):
-                    last_content = json.dumps(last_content, ensure_ascii=False)
+            row: Dict[str, Any] = {
+                # Identity
+                "run_id": run_id,
+                "session_id": sid,
+                "event_id": eid,
+                "session_type": session_type,
+                "task": task,
+                # Timing (parse_response lifts these off the record, errors included)
+                "start_time": resp["start_time"],
+                "end_time": resp["end_time"],
+                "request_latency_sec": (
+                    resp["end_time"] - resp["start_time"]
+                    if resp["start_time"] is not None and resp["end_time"] is not None
+                    else None
+                ),
+                # Tokens
+                "prompt_tokens": resp["prompt_tokens"],
+                "completion_tokens": resp["completion_tokens"],
+                "total_tokens": resp["total_tokens"],
+                # Request — derived
+                "n_tools_available": len(tools),
+                "last_message_role": last_role,
+                "last_tool_name": _last_tool_name(messages),
+                # Response — structural
+                "finish_reason": resp["finish_reason"],
+                "is_tool_turn": bool(tool_calls),
+                "n_tool_calls": len(tool_calls),
+                "tool_names": ", ".join(names),
+                "message_to_user": _message_to_user(tool_calls) if session_type == "agent" else None,
+                "content_len": len(resp["content"]),
+                "reasoning_len": len(resp["reasoning"]),
+                "has_error": not resp["ok"],
+                "has_output": resp["has_output"],
+                "error_type": resp["error"],
+                # Metric inputs, straight out of compare/.
+                **_metric_inputs(resp),
+            }
 
-                row: Dict[str, Any] = {
-                    # Identity
-                    "run_id": run_id,
-                    "session_id": sid,
-                    "event_id": eid,
-                    "session_type": session_type,
-                    "task": task,
-                    # Timing (parse_response lifts these off the record, errors included)
-                    "start_time": resp["start_time"],
-                    "end_time": resp["end_time"],
-                    "request_latency_sec": (
-                        resp["end_time"] - resp["start_time"]
-                        if resp["start_time"] is not None and resp["end_time"] is not None
-                        else None
-                    ),
-                    # Tokens
-                    "prompt_tokens": resp["prompt_tokens"],
-                    "completion_tokens": resp["completion_tokens"],
-                    "total_tokens": resp["total_tokens"],
-                    # Request — derived
-                    "n_tools_available": len(tools),
-                    "last_message_role": last_role,
-                    "last_tool_name": _last_tool_name(messages),
-                    # Response — structural
-                    "finish_reason": resp["finish_reason"],
-                    "is_tool_turn": bool(tool_calls),
-                    "n_tool_calls": len(tool_calls),
-                    "tool_names": ", ".join(names),
-                    "message_to_user": _message_to_user(tool_calls) if session_type == "agent" else None,
-                    "content_len": len(resp["content"]),
-                    "reasoning_len": len(resp["reasoning"]),
-                    "has_error": not resp["ok"],
-                    "has_output": resp["has_output"],
-                    "error_type": resp["error"],
-                    # Metric inputs, straight out of compare/.
-                    **_metric_inputs(resp),
-                }
+            if include_text:
+                row["reasoning_content"] = resp["reasoning"]
+                row["last_message_content"] = last_content
 
-                if include_text:
-                    row["reasoning_content"] = resp["reasoning"]
-                    row["last_message_content"] = last_content
-
-                all_rows.append(row)
+            all_rows.append(row)
 
     return all_rows
+
+
+def combine_rows(per_session: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Stage 2: concatenate the sessions' rows.
+
+    A flat frame is a concatenation and nothing more — no cross-session quantity is computed
+    here, which is why every column above is derivable from one session alone.
+    """
+    return [row for rows in per_session for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +421,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("base_dir", help="Directory containing run_* subdirectories")
+    ap.add_argument("base_dir", help="Experiment directory holding sessions/<session_id>/run_<i>/")
     ap.add_argument("--out", default=None, help="Output file path (default: <base_dir>/records.csv)")
     ap.add_argument(
         "--format",
@@ -427,16 +437,29 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    run_dirs = find_run_dirs(args.base_dir)
-    if not run_dirs:
-        print(f"No run_* directories found under {args.base_dir}", file=sys.stderr)
+    try:
+        # transform=None: the row builder reads the RAW records (it needs the request body,
+        # which parse_response drops).
+        result = analyze(
+            args.base_dir,
+            None,
+            lambda s: session_rows(s, include_text=args.include_text),
+            combine_rows,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
         return 1
-    print(f"Found {len(run_dirs)} run dirs: {[os.path.basename(d) for d in run_dirs]}")
 
-    rows = extract_records(run_dirs, include_text=args.include_text)
+    rows = result.combined
     if not rows:
-        print("No records extracted — check that per_request_lifecycle_metrics.json exists in each run dir.", file=sys.stderr)
+        print(
+            f"No records extracted from {args.base_dir} — check that "
+            f"{METRICS_FILE} exists in each sessions/<session_id>/run_<i>/.",
+            file=sys.stderr,
+        )
         return 1
+    n_runs = len({r["run_id"] for r in rows})
+    print(f"Found {len(result.per_session)} sessions x {n_runs} runs ({len(rows)} records)")
 
     df = pd.DataFrame(rows)
 

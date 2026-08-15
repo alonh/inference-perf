@@ -14,14 +14,19 @@
 
 """Analyze output consistency across repeated replay runs.
 
-Given N run directories each containing per_request_lifecycle_metrics.json, group the
-requests by event_id. Each record carries a session_id (the source trace) and an
-event_id (a stable identifier for one call position within that trace, of the form
-"<session_id>:event_<NNN>_<hash>"). Because the experiment runs with
-disable_output_substitution=true, a given event_id is fed byte-identical input on every
-run, so each event_id group holds the repeated outputs for ONE identical input.
-Groups are rolled up per session_id to report consistency per source trace.
-We then quantify how much those outputs differ.
+Reads one experiment directory (`<base>/sessions/<session_id>/run_<i>/`) one session at a
+time, and within a session groups the requests by event. An event is one call position in the
+session, identified by a key stable across runs (of the form "<session_id>:event_<NNN>_<hash>"
+where the records carry it). Because the experiment runs with
+disable_output_substitution=true, an event is fed byte-identical input on every run, so an
+event's group holds the repeated outputs for ONE identical input. We then quantify how much
+those outputs differ.
+
+The reduction is the shared two-stage one (`replay_parsing.analyze`): `session_groups` is
+stage 1 and combines the RUNS of one session into that session's groups and summary — the LLM
+judge runs inside it, per event — and `combine_sessions` is stage 2 and is the only place that
+sees more than one session. So a session's numbers do not depend on which other sessions were
+on disk.
 
 Metrics per group (identical-input outputs):
   - completion:   how many runs returned a usable (non-error) response
@@ -35,7 +40,7 @@ Metrics per group (identical-input outputs):
 Usage:
   analyze_consistency.py <reports_base_dir> [--judge] [--out consistency_analysis.json]
 
-<reports_base_dir> is scanned for run_* subdirectories.
+<reports_base_dir> is an experiment directory holding sessions/<session_id>/run_<i>/.
 """
 from __future__ import annotations
 
@@ -56,13 +61,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # the aggregation layer (modal fractions, per-trace roll-up, the LLM judge).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay_parsing import (  # noqa: E402
-    find_run_dirs,
-    load_run,
+    Session,
+    analyze,
     parse_response,
     parse_records,
     request_key,
-    session_key,
-    event_key,
 )
 from compare import (  # noqa: E402
     # Canonical units.
@@ -333,65 +336,37 @@ def print_report(summary: Dict[str, Any], per_trace: Dict[str, Any]) -> None:
         )
 
 
-# --------------------------------------------------------------------- driver
+# ------------------------------------------------------------- the two-stage reduction
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("base_dir", help="Directory containing run_* subdirectories")
-    ap.add_argument("--judge", action="store_true", help="Run LLM semantic judge (network calls)")
-    ap.add_argument("--out", default=None, help="Write full JSON analysis here")
-    args = ap.parse_args()
+def session_groups(
+    session: Session, judge_cfg: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Stage 1: combine the RUNS of one session into its identical-input groups + summary.
 
-    run_dirs = find_run_dirs(args.base_dir)
-    if not run_dirs:
-        print(f"No run_* directories found under {args.base_dir}", file=sys.stderr)
-        return 1
-    print(f"Found {len(run_dirs)} run dirs: {[os.path.basename(d) for d in run_dirs]}")
+    One group per event: the outputs that session's runs produced for that one call position.
+    `session.by_event()` is exactly that grouping, and because the event axis is the UNION over
+    runs, a run that stopped early contributes to the groups it reached and is simply absent
+    from the later ones — the group's `n_runs` then says so.
 
-    # Group records by event_id across all runs (one group = one identical-input call
-    # position, repeated once per run).
-    groups: Dict[str, List[dict]] = defaultdict(list)
-    total_records = 0
-    for rd in run_dirs:
-        recs = load_run(rd)
-        total_records += len(recs)
-        for rec in recs:
-            groups[event_key(rec)].append(rec)
-    print(f"Loaded {total_records} records into {len(groups)} identical-input groups.")
-
-    # Sanity check: each event_id group should be fed byte-identical input on every run.
-    split = sum(1 for recs in groups.values() if len({request_key(r) for r in recs}) > 1)
-    if split:
-        print(
-            f"warning: {split} event_id group(s) contain differing request payloads — "
-            "output substitution may not be fully disabled",
-            file=sys.stderr,
-        )
-
-    # Judge config. The API key is read from the RITS_API_KEY environment variable so
-    # no secret lives in the repo. Only needed when --judge is passed.
-    judge_key = os.environ.get("RITS_API_KEY", "")
-    if args.judge and not judge_key:
-        print("warning: --judge set but RITS_API_KEY env var is empty; judge calls will fail", file=sys.stderr)
-    judge_cfg = {
-        "url": "https://inference-3scale-apicast-production.apps.rits.fmaas.res.ibm.com/"
-        "qwen3-vl-235b-a22b-instruct/v1/chat/completions",
-        "model": "Qwen/Qwen3-VL-235B-A22B-Instruct",
-        "headers": {"RITS_API_KEY": judge_key, "Content-Type": "application/json"},
-    }
-
+    The LLM judge runs HERE, per event, so the whole conclusion for a session is reachable
+    from the session alone. `judge_cfg` is closed over by the caller rather than passed down
+    from a corpus scan: it is configuration, not data.
+    """
     analyzed: List[Dict[str, Any]] = []
-    per_trace_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for eid, recs in groups.items():
-        # session_id is derived from the records (identical across the group); event_id
-        # is the group key itself.
-        sid = session_key(recs[0])
+    n_split_input = 0
+    for eid, by_run in session.by_event().items():
+        recs = list(by_run.values())  # in run order
+        # Sanity check: an event should be fed byte-identical input on every run. If not,
+        # output substitution was not fully disabled and this group is not an identical-input
+        # group at all.
+        if len({request_key(r) for r in recs}) > 1:
+            n_split_input += 1
         g = analyze_group(recs)
-        g["session_id"] = sid
+        g["session_id"] = session.session_id
         g["event_id"] = eid
         g["request_hash"] = request_key(recs[0])[:12]
-        if args.judge and "exact" in g and not g["exact"]["all_identical"]:
+        if judge_cfg is not None and "exact" in g and not g["exact"]["all_identical"]:
             contents = [parse_response(r)["content"] for r in recs if parse_response(r)["ok"]]
             # Only judge groups with real text divergence. Pure tool-call turns have
             # empty content — their consistency is captured by the structural metrics,
@@ -400,16 +375,98 @@ def main() -> int:
             if len(non_empty) >= 2 and len(set(non_empty)) > 1:
                 g["semantic"] = judge_group(non_empty, judge_cfg)
         analyzed.append(g)
-        per_trace_groups[sid].append(g)
 
-    summary = summarize(analyzed)
-    per_trace = {sid: summarize(gs) for sid, gs in per_trace_groups.items()}
-    print_report(summary, per_trace)
+    return {
+        "session_id": session.session_id,
+        "n_runs": len(session.runs),
+        "n_events": len(session.events),
+        "n_missing_event_runs": len(session.missing()),
+        "n_split_input_groups": n_split_input,
+        "summary": summarize(analyzed),
+        "groups": analyzed,
+    }
+
+
+def combine_sessions(per_session: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stage 2: roll the per-session conclusions up across sessions.
+
+    `summary` is over every group of every session, which is an event-weighted pool and
+    therefore lets a long session outweigh a short one. That is the pre-existing meaning of
+    this script's headline and is kept; `per_trace` is the per-session breakdown to read it
+    against, and consistency_statistics.py is where the session-equal-weighted estimate with
+    its interval lives.
+    """
+    all_groups = [g for s in per_session for g in s["groups"]]
+    split = sum(s["n_split_input_groups"] for s in per_session)
+    if split:
+        print(
+            f"warning: {split} event group(s) contain differing request payloads — "
+            "output substitution may not be fully disabled",
+            file=sys.stderr,
+        )
+    return {
+        "n_sessions": len(per_session),
+        "n_groups": len(all_groups),
+        "n_split_input_groups": split,
+        "summary": summarize(all_groups),
+        "per_trace": {s["session_id"]: s["summary"] for s in per_session},
+        "groups": all_groups,
+    }
+
+
+# --------------------------------------------------------------------- driver
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("base_dir", help="Experiment directory holding sessions/<session_id>/run_<i>/")
+    ap.add_argument("--judge", action="store_true", help="Run LLM semantic judge (network calls)")
+    ap.add_argument("--out", default=None, help="Write full JSON analysis here")
+    args = ap.parse_args()
+
+    # Judge config. The API key is read from the RITS_API_KEY environment variable so
+    # no secret lives in the repo. Only needed when --judge is passed.
+    judge_cfg = None
+    if args.judge:
+        judge_key = os.environ.get("RITS_API_KEY", "")
+        if not judge_key:
+            print("warning: --judge set but RITS_API_KEY env var is empty; judge calls will fail",
+                  file=sys.stderr)
+        judge_cfg = {
+            "url": "https://inference-3scale-apicast-production.apps.rits.fmaas.res.ibm.com/"
+            "qwen3-vl-235b-a22b-instruct/v1/chat/completions",
+            "model": "Qwen/Qwen3-VL-235B-A22B-Instruct",
+            "headers": {"RITS_API_KEY": judge_key, "Content-Type": "application/json"},
+        }
+
+    try:
+        # transform=None: analyze_group and request_key read the RAW records.
+        result = analyze(
+            args.base_dir,
+            None,
+            lambda s: session_groups(s, judge_cfg),
+            combine_sessions,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    combined = result.combined
+    print(f"Analyzed {combined['n_sessions']} sessions into "
+          f"{combined['n_groups']} identical-input groups.")
+    print_report(combined["summary"], combined["per_trace"])
 
     if args.out:
         with open(args.out, "w") as f:
             json.dump(
-                {"summary": summary, "per_trace": per_trace, "groups": analyzed},
+                {
+                    "summary": combined["summary"],
+                    "per_trace": combined["per_trace"],
+                    "per_session": [
+                        {k: v for k, v in s.items() if k != "groups"} for s in result.per_session
+                    ],
+                    "groups": combined["groups"],
+                },
                 f,
                 indent=2,
                 ensure_ascii=False,

@@ -20,11 +20,22 @@ about consistency, similarity or any metric. It imports only the standard librar
 particular imports nothing from `compare/`, so a notebook or a DataFrame script that only
 wants to read a run can use it without pulling in the comparison library.
 
-  file            find_run_dirs / load_records / load_run
-  record          parse_response / parse_records        -> parsed response dict
-  record          request_key / session_key / event_key -> grouping identity
-  tool_calls      call_fields / extract_tool_names      -> names and raw arguments
+  file            load_records / load_run
+  record          parse_response / parse_records               -> parsed response dict
+  record          request_key / session_key / event_key        -> grouping identity
+  layout          find_sessions / load_session / iter_sessions -> Session (events x runs)
+  driver          analyze                                      -> the two-stage reduction
+  tool_calls      call_fields / extract_tool_names             -> names and raw arguments
   normalization   collapse_ws / strip_ws
+
+Three words, and no more: a **session** consists of **events**; a **run** is one replay of a
+whole session. There is deliberately no name for "one run of one session" — the directory
+holding it is built from (base, session_id, run_id) inside `load_session` and never surfaces.
+
+The layout read is `<base>/sessions/<session_id>/run_<i>/`, which is what `run_experiment.sh`
+writes. The older run-major layout (`<base>/run_<i>/`, many sessions per directory) is NOT
+supported: `find_run_dirs` was removed rather than made to straddle both, so pointing any
+analysis at a run-major directory fails loudly instead of returning nothing.
 
 What is deliberately NOT here: the canonical forms that exist only to be compared — the
 tool/response signatures and the kv-set (`compare/signatures.py`) — and the trace profile that
@@ -42,7 +53,11 @@ import glob
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
+
+METRICS_FILE = "per_request_lifecycle_metrics.json"
+SESSIONS_DIR = "sessions"
 
 
 # ------------------------------------------------------------------ normalization
@@ -69,12 +84,6 @@ def strip_ws(s: str) -> str:
 
 # ----------------------------------------------------------------------------- IO
 
-def find_run_dirs(base: str) -> List[str]:
-    """Every run_* subdirectory of `base`, sorted. One dir = one full replay."""
-    dirs = sorted(glob.glob(os.path.join(base, "run_*")))
-    return [d for d in dirs if os.path.isdir(d)]
-
-
 def load_records(filepath: str) -> List[dict]:
     """Load the record list from one per_request_lifecycle_metrics.json.
 
@@ -100,7 +109,7 @@ def load_run(run_dir: str) -> List[dict]:
     Tolerant counterpart of load_records: a missing file or an unrecognized shape yields
     [] rather than raising, so a sweep over many run dirs skips incomplete runs.
     """
-    path = os.path.join(run_dir, "per_request_lifecycle_metrics.json")
+    path = os.path.join(run_dir, METRICS_FILE)
     if not os.path.exists(path):
         return []
     try:
@@ -163,6 +172,215 @@ def event_key(record: dict) -> str:
     if eid:
         return str(eid)
     return session_key(record) + "::" + request_key(record)[:12]
+
+
+# ------------------------------------------------------------------------- layout
+
+_TRACE_SLOT = re.compile(r"^trace\d+_")
+
+
+class Session:
+    """One session's replayed responses: the (event, run) table, plus both ordered axes.
+
+    A session consists of EVENTS; a RUN is one replay of the whole session. The data for one
+    session is therefore a table indexed by (event, run), and the two axes are the session's
+    own structure rather than an artefact of how files were nested:
+
+      events   every event key the session produced, in call order (the union across runs)
+      runs     the run ids that produced at least one response, in numeric order
+
+    The table is SPARSE on purpose. A run truncated part-way simply has no entry for the
+    events it never reached, so ragged coverage stays visible: `events` is the union, and a
+    hole is a missing (event, run) pair rather than a shorter axis. `missing()` lists them.
+
+    Both orientations are transposes of ONE parse, so nothing is re-parsed to change view:
+    `by_event()` gives "the same input, once per run" — what comparing repeated outputs needs —
+    and `by_run()` gives "one run's path through the session" — what a per-run summary needs.
+    """
+
+    __slots__ = ("session_id", "events", "runs", "responses")
+
+    def __init__(
+        self,
+        session_id: str,
+        events: Sequence[str],
+        runs: Sequence[str],
+        responses: Dict[Tuple[str, str], Any],
+    ) -> None:
+        self.session_id = session_id
+        self.events: Tuple[str, ...] = tuple(events)
+        self.runs: Tuple[str, ...] = tuple(runs)
+        self.responses = responses
+
+    def by_event(self) -> Dict[str, Dict[str, Any]]:
+        """event -> {run: payload}, both in axis order. Missing pairs are simply absent."""
+        return {
+            e: {r: self.responses[(e, r)] for r in self.runs if (e, r) in self.responses}
+            for e in self.events
+        }
+
+    def by_run(self) -> Dict[str, Dict[str, Any]]:
+        """run -> {event: payload}, both in axis order. Missing pairs are simply absent."""
+        return {
+            r: {e: self.responses[(e, r)] for e in self.events if (e, r) in self.responses}
+            for r in self.runs
+        }
+
+    def missing(self) -> List[Tuple[str, str]]:
+        """The (event, run) pairs with no recorded response — this session's ragged coverage."""
+        return [(e, r) for e in self.events for r in self.runs
+                if (e, r) not in self.responses]
+
+    def __repr__(self) -> str:
+        return (f"Session({self.session_id!r}, {len(self.events)} events x "
+                f"{len(self.runs)} runs, {len(self.missing())} missing)")
+
+
+def _run_index(run_dir: str) -> int:
+    """Sort key for run_<i>: numeric, so run_10 does not land between run_1 and run_2."""
+    suffix = os.path.basename(run_dir.rstrip("/")).partition("_")[2]
+    return int(suffix) if suffix.isdigit() else 1 << 30
+
+
+def _run_dirs(base: str, session_id: str) -> List[str]:
+    """This session's run dirs that actually hold data, in run order.
+
+    Requiring METRICS_FILE is the runner's own done-marker for a finished replay, so an
+    interrupted experiment contributes the runs it completed instead of raising.
+    """
+    pattern = os.path.join(base, SESSIONS_DIR, session_id, "run_*")
+    dirs = [d for d in glob.glob(pattern) if os.path.exists(os.path.join(d, METRICS_FILE))]
+    return sorted(dirs, key=_run_index)
+
+
+def check_session_matches(session_id: str, run_id: str, records: List[dict]) -> None:
+    """Raise unless every record of this run belongs to `session_id`.
+
+    A run directory under sessions/<id>/ is written by a process pinned to that one session
+    (`num_sessions: 1` plus the single-session replay filter). More than one recorded session
+    means the pin did not take; a different one means the filter named the wrong session.
+    Either way the events would be attributed to a session that never produced them, which no
+    downstream metric can detect — so this is a hard error rather than a warning.
+
+    The recorded id carries the replay slot of the process that wrote it (`trace0_<dataset
+    id>` for a session-major cell, `trace<k>_` in a corpus migrated from the run-major
+    layout), so the slot is stripped before comparing: the directory name is the bare dataset
+    id in both cases.
+    """
+    recorded = {_TRACE_SLOT.sub("", session_key(rec)) for rec in records}
+    if recorded != {session_id}:
+        raise ValueError(
+            f"{run_id} of session {session_id!r} holds records for {sorted(recorded)!r} — "
+            "expected only the session it is filed under"
+        )
+
+
+def find_sessions(base: str) -> List[str]:
+    """The analyzable session ids under `base`, sorted. Empty if there are none.
+
+    Session identity is the DIRECTORY name, which is the bare dataset session id. That is
+    independent of the replay slot the records happen to carry, and it is known even for a
+    session whose every response errored.
+
+    "Analyzable" means at least one run wrote METRICS_FILE, so a partially-finished
+    experiment yields the sessions it got to rather than failing.
+    """
+    root = os.path.join(base, SESSIONS_DIR)
+    names = sorted(os.path.basename(d.rstrip("/"))
+                   for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d))
+    return [name for name in names if _run_dirs(base, name)]
+
+
+def load_session(base: str, session_id: str, transform: Optional[Callable[[dict], Any]] = None) -> Session:
+    """Load one session — every run of it — as a (event, run) table.
+
+    This is the whole filesystem entry point: one session at a time, so a notebook can work on
+    a single session without reading the other nine.
+
+    `transform` is applied ONCE per record — pass `parse_response`, or a metric layer's own
+    per-record type — and both orientations of the table then re-key objects that already
+    exist. It defaults to the raw record.
+
+    Event order is `event_key` order. The recorded event_id embeds a zero-padded call index
+    (`<session>:event_007_<call>`), so sorting the keys puts the session's events in call
+    order; the request-hash fallback is not call-ordered but is stable across runs, which is
+    what the axis has to guarantee. Within one run a repeated event key keeps the FIRST
+    record: a run should meet each identical input once, and first-wins is order-stable.
+    """
+    run_dirs = _run_dirs(base, session_id)
+    if not run_dirs:
+        raise FileNotFoundError(
+            f"no completed run under {os.path.join(base, SESSIONS_DIR, session_id)} "
+            f"(a run dir holding {METRICS_FILE})"
+        )
+
+    responses: Dict[Tuple[str, str], Any] = {}
+    runs: List[str] = []
+    events: Set[str] = set()
+    for run_dir in run_dirs:
+        run_id = os.path.basename(run_dir.rstrip("/"))
+        records = load_run(run_dir)
+        if not records:
+            continue  # marker present but unreadable/empty; load_run already tolerated it
+        check_session_matches(session_id, run_id, records)
+        runs.append(run_id)
+        for rec in records:
+            key = event_key(rec)
+            if (key, run_id) in responses:
+                continue
+            responses[(key, run_id)] = transform(rec) if transform else rec
+            events.add(key)
+
+    return Session(session_id, sorted(events), runs, responses)
+
+
+def iter_sessions(base: str, transform: Optional[Callable[[dict], Any]] = None) -> Iterator[Session]:
+    """Every analyzable session under `base`, one at a time.
+
+    A generator, so a reduction over sessions never holds more than one session's parse.
+    Raises if `base` holds no analyzable session at all — an empty-but-successful analysis is
+    the one outcome worse than a failed one.
+    """
+    session_ids = find_sessions(base)
+    if not session_ids:
+        raise FileNotFoundError(
+            f"no analyzable session under {base!r}: expected "
+            f"{os.path.join(base, SESSIONS_DIR, '<session_id>', 'run_<i>', METRICS_FILE)}"
+        )
+    for session_id in session_ids:
+        yield load_session(base, session_id, transform)
+
+
+class Analysis(NamedTuple):
+    """What `analyze` returns: the cross-session conclusion, and the per-session ones."""
+
+    combined: Any
+    per_session: List[Any]
+
+
+def analyze(
+    base: str,
+    transform: Optional[Callable[[dict], Any]],
+    session_conclusion: Callable[[Session], Any],
+    combine: Callable[[List[Any]], Any],
+) -> Analysis:
+    """The two-stage reduction every analysis in this experiment follows.
+
+      stage 1   session_conclusion(Session) -> S    combines the RUNS of one session
+      stage 2   combine([S, ...]) -> C              combines SESSIONS
+
+    Event-level reduction belongs inside stage 1, because events belong to a session. A
+    session is the unit of independence here — the U-statistic instance, the unit the CI's
+    degrees of freedom count — so `combine` is the only place that may see more than one.
+
+    `session_conclusion` takes a Session and nothing else: not `base`, not its neighbours. A
+    per-session conclusion therefore cannot depend on which other sessions happened to be on
+    disk, which is both what makes the statistics' independence claim true and what would let
+    per-session results be cached later. Anything a stage needs that is NOT corpus data (a
+    judge endpoint, an alpha) belongs in a closure over it.
+    """
+    per_session = [session_conclusion(s) for s in iter_sessions(base, transform)]
+    return Analysis(combine(per_session), per_session)
 
 
 # ------------------------------------------------------- record -> parsed response

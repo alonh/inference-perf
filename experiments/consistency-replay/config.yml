@@ -35,6 +35,16 @@ data:
 
     default_max_tokens: 200
 
+    # Cap the recorded inter-event delay (harness default is 15000 ms). The replay
+    # reproduces the original trace's think/tool gaps between calls; at 10 ms it fires
+    # each session's events back-to-back instead, so a cell finishes in a fraction of
+    # the wall-clock time. This is a PACING knob only — with
+    # disable_output_substitution: true the request bodies are unaffected, so what each
+    # call sends is byte-identical either way. It does change server-side
+    # queueing/batching timing, so note it when comparing against corpora collected
+    # before 2026-08-12, which ran at the 15 s default.
+    max_wait_ms: 10
+
     include_errors: false
     skip_invalid_files: true
 

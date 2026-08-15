@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 from datetime import datetime
 from typing import Any, List, Optional
 
@@ -57,6 +58,51 @@ class Config(BaseModel):
                     f"session-based load dispatch to properly handle event dependencies and timing."
                 )
         return self
+
+
+# Names whose value is credential material and must never be persisted. The resolved config
+# reaches durable storage twice — reportgen.base.generate_config_report writes it to
+# <run>/config.yaml, and read_config logs it in full at startup — so a key supplied via
+# `--api.headers '{"MY_API_KEY":"..."}'` or `server.api_key` would otherwise sit in plaintext
+# in every run directory and every captured log.
+SECRET_NAME_PATTERN = re.compile(r"api[-_]?key|token|secret|password|passwd|authorization|credential", re.IGNORECASE)
+
+REDACTED_VALUE = "***REDACTED***"
+
+# Every value under `headers` is treated as credential material regardless of its name: the
+# header names a gateway wants for auth are arbitrary (RITS_API_KEY, x-tenant-sig, ...), and
+# guessing which ones are sensitive fails open. The header NAMES survive redaction, so the
+# saved config still shows which headers the run sent — only the values are withheld.
+ALL_VALUES_SECRET_KEYS = frozenset({"headers"})
+
+
+def redact_secrets(value: Any, all_values_secret: bool = False) -> Any:
+    """A copy of `value` with every credential-bearing entry replaced by a placeholder.
+
+    Recurses through mappings and sequences and leaves anything else referenced as-is,
+    unwrapped: the startup log dumps a config whose `load.stages` already hold pydantic stage
+    objects, and copying those would change how yaml renders them. `None` is passed through
+    rather than masked, so `api_key: null` still reads as "unset" instead of looking like a
+    secret that was set.
+
+    Never mutates its argument — `read_config` hands the same dict to `Config(**merged_cfg)`
+    immediately afterwards.
+    """
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for k, v in value.items():
+            named_secret = isinstance(k, str) and SECRET_NAME_PATTERN.search(k) is not None
+            if (all_values_secret or named_secret) and v is not None and not isinstance(v, (dict, list, tuple)):
+                out[k] = REDACTED_VALUE
+            else:
+                nested_all_secret = isinstance(k, str) and k.lower() in ALL_VALUES_SECRET_KEYS
+                out[k] = redact_secrets(v, all_values_secret or nested_all_secret)
+        return out
+    if isinstance(value, list):
+        return [redact_secrets(v, all_values_secret) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(v, all_values_secret) for v in value)
+    return value
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -120,7 +166,9 @@ def read_config(config_file: Optional[str] = None, cli_overrides: Optional[dict[
                 standard_stages.append(StandardLoadStage(**stage))
             merged_cfg["load"]["stages"] = standard_stages
 
+    # Redacted for the log only; Config() below receives the unmodified merged_cfg.
     logger.info(
-        "Benchmarking with the following config:\n\n%s\n", yaml.dump(merged_cfg, sort_keys=False, default_flow_style=False)
+        "Benchmarking with the following config:\n\n%s\n",
+        yaml.dump(redact_secrets(merged_cfg), sort_keys=False, default_flow_style=False),
     )
     return Config(**merged_cfg)

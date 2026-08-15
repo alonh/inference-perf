@@ -25,10 +25,15 @@ Emits one JSON blob that the single-file HTML app embeds.
 
 Usage:
   export_viewer_data.py <reports_base_dir> [--analysis analysis.json] [--out viewer_data.json]
+
+<reports_base_dir> is an experiment directory holding sessions/<session_id>/run_<i>/. Groups are
+built one session at a time, so `per_trace` is keyed by the session directory name — the same key
+analyze_consistency.py writes, which is what lets --analysis join on event_id.
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import statistics
@@ -41,12 +46,10 @@ from typing import Any, Dict, List
 # below is analyze_consistency's own aggregation helper.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay_parsing import (  # noqa: E402
-    find_run_dirs,
-    load_run,
+    SESSIONS_DIR,
+    iter_sessions,
     parse_response,
     request_key,
-    session_key,
-    event_key,
     collapse_ws,
     strip_ws,
 )
@@ -129,37 +132,39 @@ def version_from_record(rec: dict, run_name: str) -> Dict[str, Any]:
     }
 
 
-def detect_model_endpoint(run_dirs: List[str]) -> tuple:
+def detect_model_endpoint(base_dir: str, records: List[dict]) -> tuple:
     """Read the model + endpoint actually used, from the run data — not hardcoded.
 
-    Source of truth is the request body ("model" field = what was actually sent). Falls
-    back to the run's config.yaml (server.model_name / base_url) if a request lacks it.
-    The endpoint label is derived from the base URL host so the viewer reflects whichever
-    model/server this particular run used (run_experiment.sh can select the model).
+    Source of truth is the request body ("model" field = what was actually sent), so
+    `records` is a sample of records the caller has already loaded — the corpus is read
+    once, by the caller, and this function does no file walk of its own beyond the config.
+    Falls back to any run's config.yaml (server.model_name / base_url) if the requests lack
+    a model. The endpoint label is derived from the base URL host so the viewer reflects
+    whichever model/server this particular experiment used.
+
+    This is experiment-level provenance, not per-session data: every run of every session
+    in one experiment directory hit the same endpoint, so the first config.yaml that
+    answers is authoritative.
     """
     model_name = None
     base_url = None
 
     # 1) model from an actual request body (authoritative — this is what was sent).
-    for rd in run_dirs:
-        for rec in load_run(rd):
-            req = rec.get("request")
-            try:
-                obj = json.loads(req) if isinstance(req, str) else req
-                m = (obj or {}).get("model")
-            except (json.JSONDecodeError, TypeError):
-                m = None
-            if m:
-                model_name = m
-                break
-        if model_name:
+    for rec in records:
+        req = rec.get("request")
+        try:
+            obj = json.loads(req) if isinstance(req, str) else req
+            m = (obj or {}).get("model")
+        except (json.JSONDecodeError, TypeError):
+            m = None
+        if m:
+            model_name = m
             break
 
-    # 2) fall back to (and read base_url from) the per-run config.yaml.
-    for rd in run_dirs:
-        cfg_path = os.path.join(rd, "config.yaml")
-        if not os.path.exists(cfg_path):
-            continue
+    # 2) fall back to (and read base_url from) a per-run config.yaml.
+    for cfg_path in sorted(
+        glob.glob(os.path.join(base_dir, SESSIONS_DIR, "*", "run_*", "config.yaml"))
+    ):
         for line in open(cfg_path):
             s = line.strip()
             if model_name is None and s.startswith("model_name:"):
@@ -188,12 +193,14 @@ def build() -> int:
     ap.add_argument("--out", default="viewer_data.json")
     args = ap.parse_args()
 
-    run_dirs = find_run_dirs(args.base_dir)
-    if not run_dirs:
-        print(f"No run_* dirs under {args.base_dir}", file=sys.stderr)
+    # One session at a time (the shared loader), and within a session one group per event.
+    # Nothing here compares across sessions: a group is the runs of ONE session at ONE call
+    # position, so the export is a concatenation of independent per-session exports.
+    try:
+        sessions = list(iter_sessions(args.base_dir))
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
         return 1
-
-    model_name, endpoint, base_url = detect_model_endpoint(run_dirs)
 
     # Map event_id -> semantic info from analysis.json (optional). The analyzer keys its
     # groups on event_id, so we do too.
@@ -204,17 +211,26 @@ def build() -> int:
             if g.get("semantic") and g.get("event_id"):
                 semantic[g["event_id"]] = g["semantic"]
 
-    # Group records by event_id across runs (one group = one identical-input call
-    # position). session_id is derived per group for the per-trace roll-up.
-    groups: Dict[str, List[tuple]] = defaultdict(list)  # event_id -> list of (run_name, record)
-    for rd in run_dirs:
-        run_name = os.path.basename(rd)
-        for rec in load_run(rd):
-            groups[event_key(rec)].append((run_name, rec))
+    # event_id -> [(run_id, record)], plus which session each group came from. Event keys
+    # embed the session, so they stay unique across sessions and the flat dict is safe.
+    groups: Dict[str, List[tuple]] = {}
+    group_session: Dict[str, str] = {}
+    run_ids: List[str] = []  # union of run ids, in run order — a label for the viewer's meta
+    for session in sessions:
+        for run_id in session.runs:
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+        for ekey, by_run in session.by_event().items():
+            groups[ekey] = list(by_run.items())  # (run_id, record), in run order
+            group_session[ekey] = session.session_id
+
+    # A few records are enough to read the model off a request body.
+    sample = [rec for items in list(groups.values())[:5] for _, rec in items]
+    model_name, endpoint, base_url = detect_model_endpoint(args.base_dir, sample)
 
     out_groups: List[Dict[str, Any]] = []
     for ekey, items in groups.items():
-        tkey = session_key(items[0][1])  # session_id (identical across the group)
+        tkey = group_session[ekey]  # the session DIRECTORY name (bare dataset id)
         rkey = request_key(items[0][1])  # request-payload hash (for display/validation)
         versions = [version_from_record(rec, run) for run, rec in items]
         ok_versions = [v for v in versions if v["ok"]]
@@ -399,8 +415,9 @@ def build() -> int:
             "model": model_name,
             "endpoint": endpoint,
             "base_url": base_url,
-            "n_runs": len(run_dirs),
-            "runs": [os.path.basename(d) for d in run_dirs],
+            "n_sessions": len(sessions),
+            "n_runs": len(run_ids),
+            "runs": run_ids,
             "substitution_disabled": True,
         },
         "summary": summ(out_groups),
@@ -410,7 +427,10 @@ def build() -> int:
     with open(args.out, "w") as f:
         json.dump(payload, f, ensure_ascii=False)
     size = os.path.getsize(args.out)
-    print(f"Wrote {args.out}: {len(out_groups)} groups ({len(usable)} usable), {size/1024:.0f} KB")
+    print(
+        f"Wrote {args.out}: {len(out_groups)} groups ({len(usable)} usable) "
+        f"from {len(sessions)} sessions x {len(run_ids)} runs, {size/1024:.0f} KB"
+    )
     return 0
 
 

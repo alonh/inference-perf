@@ -1,24 +1,35 @@
 """Reliability :: Consistency (C) metrics — session-level replay port of hal-harness.
 
 Canonical, importable definitions of the five Consistency sub-metrics from
-steverab/hal-harness (``reliability_eval/metrics/consistency.py``), adapted to this
-output-consistency **replay** setting. Kept in the library (not a script) so every caller
-— notebook, CLI, viewer — shares ONE definition, matching the rest of ``compare``.
+steverab/hal-harness (``reliability_eval/metrics/consistency.py``, the implementation
+accompanying arXiv:2602.16666), adapted to this output-consistency **replay** setting. Kept in
+the library (not a script) so every caller — notebook, CLI, viewer — shares ONE definition,
+matching the rest of ``compare``.
 
-This module is the library's **documented exception** to three of its own rules. The rest of
-``compare`` is pure, stdlib-only, and per-pair: it takes two already-parsed objects and returns
-a dict of floats, leaving aggregation to the caller. hal-harness's C metrics are not per-pair —
-each one is defined as a variance or a mean over all K runs of a session — so the aggregation
-*is* the definition, and splitting it out would leave nothing to share. Hence, only here:
-statistics over a whole run set, a ``numpy`` dependency, and file reading (:func:`compute_all`
-and :func:`load_session_runs` drive it, delegating every actual read to ``replay_parsing``).
+**This module is ONE metric, not the shared machinery.** Everything here is specific to that
+paper's C-metrics: what counts as success, which six resource channels enter C_res, the 1/3
+weights. The general layer every analysis shares — the layout read, the (event, run) table,
+and the two-stage ``session_conclusion`` / ``combine`` driver — is :mod:`replay_parsing`, which
+lives outside ``compare`` precisely so that this module and its siblings can import from one
+place. So: this file imports the contract, it does not define it, and nothing else should
+import the contract *through* it.
+
+This module is also the library's **documented exception** to three of ``compare``'s own
+rules. The rest of ``compare`` is pure, stdlib-only, and per-pair: it takes two already-parsed
+objects and returns a dict of floats, leaving aggregation to the caller. hal-harness's C
+metrics are not per-pair — each one is defined as a variance or a mean over all K runs of a
+session — so the aggregation *is* the definition, and splitting it out would leave nothing to
+share. Hence, only here: statistics over a whole run set, a ``numpy`` dependency, and file
+reading (:func:`compute_all` and :func:`load_session_runs` drive it, delegating every actual
+read to ``replay_parsing``).
 
 Unit of analysis
 ----------------
 hal-harness runs an agent **task** K times and compares the K whole-task runs. Here the
 analog of a "task" is a **session** (one recorded trace); its K "runs" are the K replays
-(``run_1`` .. ``run_K``). Per session we compute the metrics across its K replays; callers
-then aggregate (mean and standard error) across sessions via :func:`aggregate`.
+(``run_1`` .. ``run_K``). That maps onto the shared contract directly:
+:func:`session_reliability` is stage 1 (combine one session's runs) and :func:`aggregate` is
+stage 2 (mean and standard error across sessions).
 
 Metric mapping (hal-harness formula -> replay mapping)
 ------------------------------------------------------
@@ -46,20 +57,16 @@ structure", not "does the agent follow the same route".
 from __future__ import annotations
 
 import math
-import os
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from replay_parsing import (
-    event_key,
+    Session,
     extract_tool_names,
-    find_run_dirs,
-    load_run,
+    iter_sessions,
     parse_response,
-    session_key,
 )
 
 from .kernels import action_histogram, js_divergence
@@ -313,44 +320,63 @@ def aggregate(session_metrics: Sequence[SessionMetrics]) -> Dict[str, Dict]:
     return {k: mean_se([getattr(m, k) for m in session_metrics]) for k in keys}
 
 
+# -------------------------------------------------------------------- the two-stage contract
+def session_runs(session: Session) -> List[SessionRun]:
+    """One SessionRun per run of `session`, in run order.
+
+    Events are taken in the session's canonical ``events`` order, not file order: a run's
+    ``per_request_lifecycle_metrics.json`` is written in completion order, which async
+    completion under randomized schedule delays can permute, and a run-varying order would
+    spuriously deflate the sequence metric C_traj_s. The axis is ``event_key`` order, whose
+    embedded zero-padded call index makes it the same call order for every run.
+
+    A run that never reached some events contributes the ones it has, so a truncated run
+    yields a shorter trajectory rather than gaps — the same semantics as before, now visible
+    as ``session.missing()`` instead of being invisible.
+    """
+    by_run = session.by_run()
+    return [
+        summarize_session_run([by_run[r][e] for e in session.events if e in by_run[r]])
+        for r in session.runs
+    ]
+
+
+def session_reliability(session: Session) -> SessionMetrics:
+    """This module's stage 1: combine the RUNS of one session into its C-metrics.
+
+    A valid ``session_conclusion`` for :func:`replay_parsing.analyze` — it takes a Session and
+    nothing else, so the result cannot depend on which other sessions were on disk. The name
+    is the metric's, not the contract's: these are the paper's C-metrics specifically, and
+    another analysis plugs its own stage 1 into the same driver.
+    """
+    return compute_session_metrics(session.session_id, session_runs(session))
+
+
 # --------------------------------------------------------------------------------- loading
 def load_session_runs(base: str) -> Dict[str, List[SessionRun]]:
-    """Return {session_id: [SessionRun per replay run]} for a base dir of run_* folders.
+    """Return {session_id: [SessionRun per replay run]} for one experiment directory.
 
-    Reads each run's ``per_request_lifecycle_metrics.json`` directly via
-    :func:`replay_parsing.load_run`, groups records by :func:`replay_parsing.session_key`, and
-    summarizes each (session, run). This is the one function in ``compare`` that touches the
-    filesystem — see the module docstring's note on why it lives here anyway.
+    Kept for callers that want the raw per-run summaries rather than the metrics. The layout
+    read and the (event, run) table are :mod:`replay_parsing`'s; this is only the projection
+    into ``SessionRun``.
     """
-    run_dirs = find_run_dirs(base)
-    if not run_dirs:
-        raise FileNotFoundError(f"No run_* directories found under {base!r}")
-
-    sessions: Dict[str, List[SessionRun]] = defaultdict(list)
-    for run_dir in run_dirs:
-        records = load_run(run_dir)
-        if not records:
-            continue
-        # Group this run's records by session, then order events by event_id. The file's
-        # write order is NOT guaranteed to be call order (async completion under randomized
-        # schedule delays could reorder it), and a run-varying order would spuriously deflate
-        # the sequence metric C_traj_s. event_id embeds a zero-padded call index that is
-        # stable across runs, so sorting by it fixes one canonical trajectory per session.
-        raw_by_session: Dict[str, List[dict]] = defaultdict(list)
-        for rec in records:
-            raw_by_session[session_key(rec)].append(rec)
-        for sid, recs in raw_by_session.items():
-            recs.sort(key=event_key)
-            events = [parse_response(rec) for rec in recs]
-            sessions[sid].append(summarize_session_run(events))
-
-    return dict(sessions)
+    return {s.session_id: session_runs(s) for s in iter_sessions(base, parse_response)}
 
 
 def compute_all(base: str, min_runs: int = 2) -> Tuple[List[SessionMetrics], Dict[str, Dict], int]:
-    """End-to-end: load a base dir and return (per-session metrics, aggregate, n_skipped)."""
-    sessions = load_session_runs(base)
-    usable = {sid: runs for sid, runs in sessions.items() if len(runs) >= min_runs}
-    skipped = len(sessions) - len(usable)
-    session_metrics = [compute_session_metrics(sid, runs) for sid, runs in sorted(usable.items())]
-    return session_metrics, aggregate(session_metrics), skipped
+    """End-to-end: load a base dir and return (per-session metrics, aggregate, n_skipped).
+
+    Stage 1 is :func:`session_metrics` per session, stage 2 is :func:`aggregate` across them —
+    the mean is over SESSIONS, never over a pool of runs, because the session is the unit of
+    independence. Sessions with fewer than ``min_runs`` runs cannot support a consistency
+    number at all and are counted as skipped rather than folded in.
+    """
+    metrics: List[SessionMetrics] = []
+    skipped = 0
+    for session in iter_sessions(base, parse_response):
+        if len(session.runs) < min_runs:
+            skipped += 1
+            continue
+        metrics.append(session_reliability(session))
+    metrics.sort(key=lambda m: m.session_id)
+    return metrics, aggregate(metrics), skipped

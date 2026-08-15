@@ -36,6 +36,7 @@ from inference_perf.config import (
     ReportConfig,
     SessionLifecycleReportConfig,
     GoodputConfig,
+    redact_secrets,
 )
 from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.utils import ReportFile
@@ -845,11 +846,16 @@ class ReportGenerator:
     def generate_config_report(self) -> ReportFile:
         """
         Generates a report file containing the config.
+
+        Credential values (api keys, tokens, every `headers` value) are redacted: this file is
+        written to the run's storage directory, which outlives the run and is routinely copied,
+        shared and archived. The keys are kept, so the report still records which headers the
+        run sent.
         """
         return ReportFile(
             name="config",
             file_type="yaml",
-            contents=self.config.model_dump(mode="json", by_alias=True),
+            contents=redact_secrets(self.config.model_dump(mode="json", by_alias=True)),
         )
 
     async def generate_reports(

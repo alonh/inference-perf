@@ -16,14 +16,18 @@
 
 # Analyze an EXISTING consistency-experiment results directory and (re)build the viewer,
 # without launching any new replay runs. This is the SKILL.md "Analysis-only (reuse
-# existing runs)" path — Steps 2 / 2c / 3 against run_* dirs that already exist.
+# existing runs)" path — Steps 2 / 2c / 3 against session/run dirs that already exist.
 #
 # Usage:
 #   experiments/consistency-replay/analyze_experiment.sh <RESULTS_DIR> [options]
 #
-#   RESULTS_DIR   A directory containing run_* subdirectories, e.g.
-#                 reports-consistency/qwen-qwen3-vl-235b-a22b-instruct_tau2-airline_20260802-105239
-#                 (or the shared reports-consistency/ dir used by run_consistency.sh).
+#   RESULTS_DIR   An experiment directory holding sessions/<session_id>/run_<i>/, e.g.
+#                 reports-consistency/tau2_airline/qwen-qwen3-vl-235b-a22b-instruct/20260812-183412
+#
+#                 The OLD run-major layout (top-level run_* dirs, each holding all sessions)
+#                 is NOT readable: the analysis scripts read one session at a time and there
+#                 is no session axis in that layout. run_consistency.sh still writes it, so
+#                 its output cannot be analyzed by this script.
 #
 # Options:
 #   --no-judge    Skip the LLM semantic-judge pass in analyze_consistency.py (no network,
@@ -33,7 +37,7 @@
 #   --no-viewer   Stop after analysis; do not build the HTML viewer.
 #
 # Everything is written INTO <RESULTS_DIR> (analysis.json, analysis_papers.json,
-# consistency_viewer.html). Existing run_* dirs are read-only inputs; nothing is deleted.
+# consistency_viewer.html). The existing sessions/ tree is a read-only input; nothing is deleted.
 #
 # The offline metrics + viewer need NO network and NO API key. Only the judge pass
 # (default on; disable with --no-judge) makes network calls and reads RITS_API_KEY.
@@ -80,16 +84,30 @@ if [ ! -d "$RESULTS_DIR" ]; then
   echo "ERROR: results dir not found: $RESULTS_DIR" >&2
   exit 2
 fi
-# Confirm it actually holds run_* *directories* before doing work. (Match the analyzer's
-# find_run_dirs, which keeps only isdir() entries — a logs/ dir full of run_*.log files
-# must NOT pass this guard.)
-n_runs=0
-for d in "$RESULTS_DIR"/run_*; do
-  [ -d "$d" ] && n_runs=$((n_runs + 1))
+# Confirm it actually holds sessions/<session_id>/run_<i>/ *directories* holding the done
+# marker, before doing work. (Match replay_parsing._run_dirs, which keeps only entries that
+# hold per_request_lifecycle_metrics.json — a logs/<sid>/run_*.log tree must NOT pass, and
+# neither must a run dir whose replay died before writing its metrics.)
+n_cells=0
+n_sessions=0
+for sd in "$RESULTS_DIR"/sessions/*; do
+  [ -d "$sd" ] || continue
+  found_in_session=0
+  for d in "$sd"/run_*; do
+    if [ -f "$d/per_request_lifecycle_metrics.json" ]; then
+      n_cells=$((n_cells + 1))
+      found_in_session=1
+    fi
+  done
+  [ "$found_in_session" -eq 1 ] && n_sessions=$((n_sessions + 1))
 done
-if [ "$n_runs" -eq 0 ]; then
-  echo "ERROR: no run_* subdirectories under $RESULTS_DIR" >&2
-  echo "       Point this at a results dir produced by run_experiment.sh / run_consistency.sh." >&2
+if [ "$n_cells" -eq 0 ]; then
+  echo "ERROR: no sessions/<session_id>/run_<i>/per_request_lifecycle_metrics.json under $RESULTS_DIR" >&2
+  echo "       Point this at a session-major results dir produced by run_experiment.sh." >&2
+  if [ -d "$RESULTS_DIR/run_1" ]; then
+    echo "       NOTE: $RESULTS_DIR holds top-level run_* dirs — that is the OLD run-major" >&2
+    echo "       layout, which the analysis scripts no longer read." >&2
+  fi
   exit 2
 fi
 
@@ -106,6 +124,7 @@ VIEWER_HTML="$RESULTS_DIR/consistency_viewer.html"
 echo "=================================================="
 echo "Analyze existing experiment"
 echo "Results dir: $RESULTS_DIR"
+echo "Data:        $n_sessions sessions, $n_cells completed (session, run) cells"
 echo "Judge:       $([ "$JUDGE" -eq 1 ] && echo 'on (network)' || echo 'off')"
 echo "Papers:      $([ "$PAPERS" -eq 1 ] && echo 'yes' || echo 'no')"
 echo "Viewer:      $([ "$VIEWER" -eq 1 ] && echo 'yes' || echo 'no')"

@@ -29,7 +29,7 @@ from inference_perf.config.client.modelserver import (
 )
 from inference_perf.config.client.server_metrics import PrometheusClientConfig
 from inference_perf.config.common import Distribution, DistributionType
-from inference_perf.config.config import Config, deep_merge, read_config
+from inference_perf.config.config import REDACTED_VALUE, Config, deep_merge, read_config, redact_secrets
 from inference_perf.config.datagen import (
     AnyResolution,
     AudioDatagenConfig,
@@ -132,4 +132,6 @@ __all__ = [
     "WeightedVideoProfile",
     "deep_merge",
     "read_config",
+    "redact_secrets",
+    "REDACTED_VALUE",
 ]

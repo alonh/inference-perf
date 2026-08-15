@@ -180,6 +180,7 @@ cython_debug/
 
 # Test Reports (directories)
 reports-*/
+*.parquet
 
 # HuggingFace cache
 .hf_cache/
@@ -192,3 +193,6 @@ tests/optional/**/output/
 
 # HAL trace data (large; fetch via hal_traces/fetch_hal_traces.py)
 hal_traces/
+
+# References papers
+References/

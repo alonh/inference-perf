@@ -36,8 +36,10 @@ Usage
 -----
   find_metric_witnesses.py <run_base_dir> [--full] [--threshold 0.999] [--json OUT]
 
-  <run_base_dir>   directory containing run_* subdirs, each with
-                   per_request_lifecycle_metrics.json (same layout the analyzers consume).
+  <run_base_dir>   experiment directory holding sessions/<session_id>/run_<i>/, each run dir
+                   with per_request_lifecycle_metrics.json (the layout the analyzers consume).
+                   Pairs are built per session (`session_pairs`); the witness search then runs
+                   over the pooled candidates, which is a corpus-level question by nature.
   --full           print full (untruncated) content / arguments for each witness.
   --threshold T    agreement cutoff for competitors (default 0.999).
   --json OUT       also write the machine-readable witness table to OUT.
@@ -55,8 +57,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # (single source of truth for each).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from replay_parsing import (  # noqa: E402
-    find_run_dirs,
-    load_run,
+    Session,
+    analyze,
     parse_response,
     collapse_ws,
     extract_tool_names,
@@ -183,31 +185,40 @@ def metric_vector(pa: dict, pb: dict) -> Dict[str, float]:
 
 # ------------------------------------------------------------------------------ IO
 
-def load_groups(base_dir: str) -> Dict[str, Dict[str, dict]]:
-    """event_id -> {run_id: parsed response}. Same grouping (and same IO) the analyzers use."""
-    run_dirs = find_run_dirs(base_dir)
-    if not run_dirs:
-        raise SystemExit(f"No run_* subdirs found in {base_dir}")
+def session_pairs(session: Session) -> Dict[str, Any]:
+    """Stage 1: ONE session's usable run-pairs as metric vectors.
+
+    `session.by_event()` is event -> {run: parsed response}, so a pair is two runs' outputs for
+    the SAME identical input — the only comparison a witness may be built from. Runs come in
+    numeric order, so the pair printed as "A vs B" reads in replay order.
+
+    Returns both the rows and the table they were built from: the witness search reports a pair,
+    and rendering it needs the two responses back.
+    """
+    groups = session.by_event()
+    rows = [
+        (eid, a, b, metric_vector(by_run[a], by_run[b]))
+        for eid, by_run in groups.items()
+        for a, b in combinations(by_run, 2)
+        if by_run[a]["ok"] and by_run[b]["ok"]
+    ]
+    return {"session_id": session.session_id, "groups": groups, "rows": rows}
+
+
+def combine_pairs(per_session: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stage 2: pool every session's pairs into one corpus-wide candidate set.
+
+    The witness search IS a corpus-level question — "somewhere in this data, is there a pair
+    that isolates this metric?" — so pooling here is the point, not a leak. Each pair is still
+    within one session; pooling only widens the search, it never compares across sessions.
+    Event keys embed the session, so the merged `groups` lookup cannot collide.
+    """
     groups: Dict[str, Dict[str, dict]] = {}
-    for rd in run_dirs:
-        run = os.path.basename(rd)
-        for rec in load_run(rd):
-            eid = rec.get("event_id")
-            if eid is None:
-                continue
-            groups.setdefault(eid, {})[run] = parse_response(rec)
-    return groups
-
-
-def build_rows(groups: Dict[str, Dict[str, dict]]) -> List[Tuple[str, str, str, Dict[str, float]]]:
-    """Every usable run-pair's metric vector: (event_id, runA, runB, vector)."""
-    rows = []
-    for eid, byrun in groups.items():
-        for a, b in combinations(sorted(byrun), 2):
-            pa, pb = byrun[a], byrun[b]
-            if pa["ok"] and pb["ok"]:
-                rows.append((eid, a, b, metric_vector(pa, pb)))
-    return rows
+    rows: List[Tuple[str, str, str, Dict[str, float]]] = []
+    for s in per_session:
+        groups.update(s["groups"])
+        rows.extend(s["rows"])
+    return {"n_sessions": len(per_session), "groups": groups, "rows": rows}
 
 
 # ------------------------------------------------------------------------- witnesses
@@ -268,16 +279,23 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("run_base_dir", help="Directory containing run_* subdirs")
+    ap.add_argument("run_base_dir",
+                    help="Experiment directory holding sessions/<session_id>/run_<i>/")
     ap.add_argument("--full", action="store_true", help="Print untruncated content/args")
     ap.add_argument("--threshold", type=float, default=0.999,
                     help="Agreement cutoff for competitors (default 0.999)")
     ap.add_argument("--json", dest="json_out", help="Write witness table to this JSON file")
     args = ap.parse_args()
 
-    groups = load_groups(args.run_base_dir)
-    rows = build_rows(groups)
+    try:
+        result = analyze(args.run_base_dir, parse_response, session_pairs, combine_pairs)
+    except (FileNotFoundError, ValueError) as e:
+        raise SystemExit(f"error: {e}")
+
+    groups = result.combined["groups"]
+    rows = result.combined["rows"]
     print(f"Source: {args.run_base_dir}")
+    print(f"Sessions: {result.combined['n_sessions']}")
     print(f"Identical-input groups: {len(groups)}   Usable run-pairs: {len(rows)}")
     print(f"Agreement threshold: {args.threshold}\n")
 
@@ -338,7 +356,9 @@ def main() -> int:
 
     if args.json_out:
         with open(args.json_out, "w") as f:
-            json.dump({"source": args.run_base_dir, "n_groups": len(groups),
+            json.dump({"source": args.run_base_dir,
+                       "n_sessions": result.combined["n_sessions"],
+                       "n_groups": len(groups),
                        "n_pairs": len(rows), "witnesses": table}, f, indent=2)
         print(f"Wrote witness table to {args.json_out}")
     return 0
