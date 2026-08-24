@@ -1290,7 +1290,102 @@ def build_graph(
 
     root_event_ids = [event_ids[i] for i in range(n) if not predecessor_indices[i]]
 
-    return ReplayGraph(events=events, root_event_ids=root_event_ids, source_file=source_file)
+    graph = ReplayGraph(events=events, root_event_ids=root_event_ids, source_file=source_file)
+    tag_user_facing_events(graph)
+    return graph
+
+
+# ---------------------------------------------------------------------------
+# User-facing event tagging (TFUT)
+# ---------------------------------------------------------------------------
+
+
+def tag_user_facing_events(graph: ReplayGraph, all_spans: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Tag each event with is_user_facing, is_structured_output_call, is_tool_internal.
+
+    A user-facing event is one whose output reaches the end user — used as
+    the anchor for Time to First User Token (TFUT). Three conditions must all hold:
+      1. Not a tool call (expected_output_is_tool_call == False AND
+         finish_reason not in {tool_use, tool_calls}; either signal excludes)
+      2. Not a structured-output call (no output_schema, output.type != "json")
+      3. Not tool-internal — detected via two strategies:
+         - Structural (primary): event's span is nested under a tool.execution span.
+         - Fallback (no span data): event outputs a tool call AND has a causal
+           successor. Prose events with successors (multi-turn) are NOT tool-internal.
+    """
+    # Build successor map
+    successors: Dict[str, List[Tuple[str, str]]] = {eid: [] for eid in graph.events}
+    for eid, event in graph.events.items():
+        for pred_id, dep_type in event.predecessor_dependency_types.items():
+            if pred_id in successors:
+                successors[pred_id].append((eid, dep_type))
+
+    # Build set of span_ids nested under tool-execution spans (structural tool-internal detection)
+    tool_internal_span_ids: Set[str] = set()
+    tool_exec_span_ids: Set[str] = set()
+    if all_spans:
+        span_by_id: Dict[str, Dict[str, Any]] = {}
+        for span in all_spans:
+            sid = span.get("span_id", "")
+            span_by_id[sid] = span
+            name = span.get("name", "") or ""
+            if "tool.execution" in name or "tool_execution" in name:
+                tool_exec_span_ids.add(sid)
+
+        if tool_exec_span_ids:
+            for span in all_spans:
+                parent = span.get("parent_span_id")
+                if parent and parent in tool_exec_span_ids:
+                    tool_internal_span_ids.add(span.get("span_id", ""))
+                # Walk up the parent chain for deeper nesting
+                visited: Set[str] = set()
+                current_parent = parent
+                while current_parent and current_parent not in visited:
+                    visited.add(current_parent)
+                    if current_parent in tool_exec_span_ids:
+                        tool_internal_span_ids.add(span.get("span_id", ""))
+                        break
+                    parent_span = span_by_id.get(current_parent)
+                    current_parent = parent_span.get("parent_span_id") if parent_span else None
+
+    has_structural_tool_info = bool(tool_exec_span_ids)
+
+    _TOOL_CALL_FINISH_REASONS = {"tool_use", "tool_calls"}
+
+    for eid, event in graph.events.items():
+        gc = event.call
+        attrs = gc.attributes or {}
+
+        # Condition 2: structured-output call detection
+        # A call with an output schema answers a programmatic consumer, not the user.
+        has_output_schema = "gen_ai.request.output_schema" in attrs
+        output_type = attrs.get("gen_ai.output.type", "")
+        is_structured_output = has_output_schema or (isinstance(output_type, str) and output_type.lower() == "json")
+        event.is_structured_output_call = is_structured_output
+
+        # Condition 3: tool-internal detection
+        # Primary: structural (span nested under tool execution)
+        span_id = gc.call_id
+        is_tool_internal_structural = span_id in tool_internal_span_ids
+        # Fallback (no span info): an event is tool-internal when its output is a
+        # tool call consumed by a successor. A prose-output event with successors is
+        # just multi-turn context sharing, not tool-internal.
+        is_tool_internal_fallback = gc.expected_output_is_tool_call and any(
+            dep_type != "temporal" for _, dep_type in successors[eid]
+        )
+        is_tool_internal = is_tool_internal_structural or (not has_structural_tool_info and is_tool_internal_fallback)
+        event.is_tool_internal = is_tool_internal
+
+        # Condition 1: not a tool call (two independent signals, either excludes)
+        finish_reasons_raw = attrs.get("gen_ai.response.finish_reasons", [])
+        if isinstance(finish_reasons_raw, str):
+            finish_reasons_raw = [finish_reasons_raw]
+        has_tool_call_finish_reason = bool(finish_reasons_raw) and any(
+            (fr.lower() if isinstance(fr, str) else "") in _TOOL_CALL_FINISH_REASONS for fr in finish_reasons_raw
+        )
+        not_tool_call = not gc.expected_output_is_tool_call and not has_tool_call_finish_reason
+
+        event.is_user_facing = not_tool_call and not is_structured_output and not is_tool_internal
 
 
 # ---------------------------------------------------------------------------
@@ -1333,7 +1428,7 @@ def graph_call_to_dict(gc: GraphCall) -> Dict[str, Any]:
 
 
 def graph_event_to_dict(event: GraphEvent) -> Dict[str, Any]:
-    return {
+    d: Dict[str, Any] = {
         "event_id": event.event_id,
         "t_start_ms": event.t_start_ms,
         "t_end_ms": event.t_end_ms,
@@ -1342,6 +1437,13 @@ def graph_event_to_dict(event: GraphEvent) -> Dict[str, Any]:
         "wait_ms": event.wait_ms,
         "call": graph_call_to_dict(event.call),
     }
+    if event.is_user_facing:
+        d["is_user_facing"] = True
+    if event.is_structured_output_call:
+        d["is_structured_output_call"] = True
+    if event.is_tool_internal:
+        d["is_tool_internal"] = True
+    return d
 
 
 def graph_to_dict(graph: ReplayGraph) -> Dict[str, Any]:
@@ -1555,6 +1657,8 @@ def main() -> None:
         raise SystemExit("No LLM spans found in trace file")
 
     graph = build_graph(calls, source_file=args.input)
+    # Re-tag with full span list for structural tool-internal detection
+    tag_user_facing_events(graph, all_spans=spans)
 
     out_path = Path(args.output)
     out_path.write_text(

@@ -72,6 +72,7 @@ from inference_perf.datagen.replay.replay_graph_session_datagen import (
 from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
     build_raw_calls,
     build_graph,
+    tag_user_facing_events,
 )
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 from inference_perf.apis import InferenceAPIData, LazyLoadInferenceAPIData
@@ -503,6 +504,8 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 logger.warning(f"No LLM calls found in {session_id}")
                 return None
             graph = build_graph(raw_calls, source_file=source_id)
+            # Re-tag leaves with full span list for structural tool-internal detection
+            tag_user_facing_events(graph, all_spans=spans)
         except Exception as e:
             logger.error(f"Error building graph from {session_id}: {e}", exc_info=True)
             return None

@@ -1642,6 +1642,10 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         if state.failure_reason:
             error = ErrorResponseInfo(error_type="SessionReplayError", error_msg=state.failure_reason)
 
+        # Extract user-facing leaf event IDs and confidence from the graph
+        user_facing_event_ids = [eid for eid, event in state.graph.events.items() if event.is_user_facing]
+        num_structured_output_excluded = sum(1 for event in state.graph.events.values() if event.is_structured_output_call)
+
         return SessionLifecycleMetric(
             session_id=session_id,
             stage_id=stage_id,
@@ -1655,6 +1659,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             error=error,
             n_recorded_substitutions=state.n_recorded_substitutions,
             recorded_substitution_event_ids=state.recorded_substitution_event_ids,
+            user_facing_event_ids=user_facing_event_ids or None,
+            num_structured_output_excluded=num_structured_output_excluded or None,
         )
 
     def activate_session(self, session_id: str) -> None:
@@ -1830,7 +1836,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
         if api_config is not None and api_config.type == APIType.AnthropicMessages:
             api_data_class = SessionAnthropicMessagesAPIData
 
-        return api_data_class(
+        api_data = api_data_class(
             messages=chat_messages,
             max_tokens=max_tokens,
             tool_definitions=event.tool_definitions,
@@ -1865,6 +1871,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             # Back-reference so the event can evict this session from the worker once drained.
             generator=self,
         )
+        api_data.labels["event_id"] = raw_event_id
+        return api_data
 
     def cleanup_session(self, session_id: str) -> None:
         state = self.session_graph_state.get(session_id)

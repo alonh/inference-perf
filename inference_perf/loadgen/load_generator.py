@@ -461,6 +461,7 @@ class LoadGenerator:
         )  # Sessions waiting to start
         completed_session_ids: Set[str] = set()  # Session IDs that have completed
         session_dispatch_times: Dict[str, float] = {}  # session_id → wall-clock dispatch time
+        session_dispatch_perf_counters: Dict[str, float] = {}  # session_id → perf_counter dispatch time
 
         # Cache OTEL instrumentation to avoid redundant calls
         otel_instr = get_otel_instrumentation()
@@ -542,6 +543,7 @@ class LoadGenerator:
 
             # Record dispatch time for session duration tracking
             session_dispatch_times[session_id] = time.time()
+            session_dispatch_perf_counters[session_id] = time.perf_counter()
 
             # Get all events for this session
             events = self.datagen.get_session_events(session_idx)
@@ -654,12 +656,19 @@ class LoadGenerator:
                 # Build and record session-level metric before cleanup
                 session_info = self.datagen.get_session_info(session_idx)
                 session_id = session_info["session_id"]
+                dispatch_time = session_dispatch_times.get(session_id)
+                if dispatch_time is None:
+                    logger.warning(
+                        f"Session {session_id} has no recorded dispatch time; "
+                        f"falling back to stage start for session start_time."
+                    )
                 session_metric = self.datagen.build_session_metric(
                     session_id=session_id,
                     stage_id=stage_id,
-                    start_time=session_dispatch_times.get(session_id, start_time_epoch),
+                    start_time=dispatch_time if dispatch_time is not None else start_time_epoch,
                     end_time=time.time(),
                 )
+                session_metric.dispatch_perf_counter = session_dispatch_perf_counters.get(session_id)
 
                 # Record in collector instead of datagen
                 if self.session_metrics_collector:

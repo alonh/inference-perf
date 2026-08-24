@@ -109,6 +109,9 @@ class GraphEvent:
     wait_ms: int
     t_start_ms: int
     t_end_ms: int
+    is_user_facing: bool = False
+    is_structured_output_call: bool = False
+    is_tool_internal: bool = False
 
 
 @dataclass

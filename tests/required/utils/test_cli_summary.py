@@ -77,8 +77,31 @@ class TestCliSummary(unittest.TestCase):
         }
         report = ReportFile(name="stage_0_session_lifecycle_metrics", contents=contents)
         print_session_summary_tables([report])
-        # 3 session tables printed
+        # 3 session tables printed (no TFUT data → TFUT table skipped)
         self.assertEqual(mock_console_print.call_count, 3)
+
+    @patch("inference_perf.utils.cli_summary.Console.print")
+    def test_print_session_summary_tables_with_tfut(self, mock_console_print: MagicMock) -> None:
+        contents = {
+            "num_sessions": 5,
+            "num_sessions_succeeded": 5,
+            "num_sessions_failed": 0,
+            "total_events": 30,
+            "total_events_completed": 30,
+            "total_events_cancelled": 0,
+            "sessions_per_second": 0.12,
+            "session_duration_sec": {"mean": 13.8, "median": 12.7, "p90": 15.7},
+            "num_events": {"mean": 6.0, "median": 6.0, "p90": 6.0},
+            "total_input_tokens": {"mean": 9068.0, "median": 9065.0, "p90": 9093.0},
+            "total_output_tokens": {"mean": 239.0, "median": 239.0, "p90": 243.0},
+            "tfut_sec": {"mean": 11.84, "median": 10.69, "p90": 13.71},
+            "sessions_with_tfut": 5,
+            "tfut_none_reasons": None,
+        }
+        report = ReportFile(name="stage_0_session_lifecycle_metrics", contents=contents)
+        print_session_summary_tables([report])
+        # 3 session tables + 1 TFUT table = 4
+        self.assertEqual(mock_console_print.call_count, 4)
 
     @patch("inference_perf.utils.cli_summary.Console.print")
     def test_print_summary_table_includes_session_tables(self, mock_console_print: MagicMock) -> None:

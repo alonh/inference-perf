@@ -111,6 +111,14 @@ class SessionLifecycleMetric(BaseModel):
     # server (chat template and tool-schema overhead the client does not model)
     # and can push it above 1.0. None whenever total_cached_tokens is None.
     total_cacheable_input_tokens: Optional[int] = None
+    # TFUT (Time to First User Token) — per-session user-perceived latency.
+    # Anchored on session dispatch time (includes client-side queue delay),
+    # not the moment the first request reached the server.
+    user_facing_event_ids: Optional[List[str]] = None
+    num_structured_output_excluded: Optional[int] = None
+    tfut_sec: Optional[float] = None
+    tfut_none_reason: Optional[str] = None
+    dispatch_perf_counter: Optional[float] = None
 
 
 class InferenceAPIData(BaseModel):

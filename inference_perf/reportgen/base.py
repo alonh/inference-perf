@@ -960,6 +960,18 @@ class ReportGenerator:
         prompt_total = sum(m.total_cacheable_input_tokens for m in metrics if m.total_cacheable_input_tokens is not None)
         kv_cache_hit_percent = (100.0 * cached_total / prompt_total) if prompt_total else None
 
+        # TFUT summary
+        tfut_values = [m.tfut_sec for m in metrics if m.tfut_sec is not None]
+        sessions_with_tfut = len(tfut_values)
+        tfut_none_reasons: dict[str, int] = defaultdict(int)
+        for m in metrics:
+            if m.tfut_none_reason:
+                tfut_none_reasons[m.tfut_none_reason] += 1
+        num_uf_events_values = [float(len(m.user_facing_event_ids)) for m in metrics if m.user_facing_event_ids is not None]
+        structured_output_excluded_values = [
+            float(m.num_structured_output_excluded) for m in metrics if m.num_structured_output_excluded is not None
+        ]
+
         return {
             "num_sessions": num_sessions,
             "num_sessions_succeeded": num_succeeded,
@@ -993,6 +1005,11 @@ class ReportGenerator:
             ),
             "kv_cache_hit_percent": kv_cache_hit_percent,
             "kv_cache_hit_per_session_percent": summarize(kv_cache_hit_per_session_percent, percentiles),
+            "tfut_sec": summarize(tfut_values, percentiles),
+            "sessions_with_tfut": sessions_with_tfut,
+            "tfut_none_reasons": dict(tfut_none_reasons) if tfut_none_reasons else None,
+            "num_user_facing_events": summarize(num_uf_events_values, percentiles),
+            "num_structured_output_excluded": summarize(structured_output_excluded_values, percentiles),
         }
 
     def _enrich_sessions(
@@ -1001,11 +1018,11 @@ class ReportGenerator:
         request_metrics: List[RequestLifecycleMetric],
         use_server_output_tokens: bool = False,
     ) -> None:
-        """Aggregate per-request token totals and error status onto each session.
+        """Aggregate per-request token totals, error status, and TFUT onto each session.
 
         Mutates each ``SessionLifecycleMetric`` in ``session_metrics`` in place,
         setting ``total_input_tokens``, ``total_output_tokens``,
-        ``total_cached_tokens``, ``error``, and ``success`` from the matching
+        ``total_cached_tokens``, ``error``, ``success``, and TFUT fields from the matching
         request-level metrics.
         """
         token_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
@@ -1017,6 +1034,8 @@ class ReportGenerator:
         # tokens. Numerator and denominator accumulate over exactly the same
         # requests so the ratio never mixes sources.
         cache_by_session: dict[str, tuple[int, int]] = {}
+        # Index requests by (session_id, event_id) for TFUT lookup
+        requests_by_session_event: dict[str, dict[str, RequestLifecycleMetric]] = defaultdict(dict)
 
         for m in request_metrics:
             if m.session_id:
@@ -1027,6 +1046,9 @@ class ReportGenerator:
                 )
                 if m.session_id not in error_by_session and m.error is not None:
                     error_by_session[m.session_id] = m.error
+                event_id = m.info.labels.get("event_id")
+                if event_id:
+                    requests_by_session_event[m.session_id][event_id] = m
 
                 if m.error is None:
                     response_metrics = m.info.response_metrics
@@ -1048,6 +1070,57 @@ class ReportGenerator:
             if request_error is not None:
                 sm.error = request_error
             sm.success = (sm.num_events_completed == sm.num_events) and (sm.error is None)
+
+            # Compute TFUT
+            ReportGenerator._compute_tfut(sm, requests_by_session_event.get(sm.session_id, {}))
+
+    @staticmethod
+    def _compute_tfut(
+        sm: SessionLifecycleMetric,
+        event_requests: dict[str, "RequestLifecycleMetric"],
+    ) -> None:
+        """Compute Time to First User Token for a single session.
+        TFUT = time from session dispatch to the first output token on the
+        earliest user-facing event (measured on the same monotonic clock).
+        """
+        uf_event_ids = sm.user_facing_event_ids
+        if not uf_event_ids:
+            sm.tfut_none_reason = "no_user_facing"
+            return
+
+        # dispatch_perf_counter is the monotonic anchor for all TFUT math
+        if sm.dispatch_perf_counter is None:
+            sm.tfut_none_reason = "no_dispatch_anchor"
+            return
+
+        candidates: List[float] = []
+        has_non_streaming = False
+        has_no_output_tokens = False
+
+        # Collect TFUT from each user-facing event that has token timestamps
+        for eid in uf_event_ids:
+            req = event_requests.get(eid)
+            if req is None:
+                continue
+            response_metrics = req.info.response_metrics
+            if not isinstance(response_metrics, StreamedResponseMetrics):
+                has_non_streaming = True
+                continue
+            if len(response_metrics.output_token_times) < 1:
+                has_no_output_tokens = True
+                continue
+            tfut = response_metrics.output_token_times[0] - sm.dispatch_perf_counter
+            candidates.append(tfut)
+
+        # TFUT is the minimum across user-facing events (earliest user-visible output)
+        if candidates:
+            sm.tfut_sec = min(candidates)
+        elif has_non_streaming:
+            sm.tfut_none_reason = "non_streaming"
+        elif has_no_output_tokens:
+            sm.tfut_none_reason = "no_output_tokens"
+        else:
+            sm.tfut_none_reason = "no_user_facing"
 
     def generate_session_reports(
         self,

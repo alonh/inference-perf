@@ -345,6 +345,20 @@ def print_session_summary_tables(reports: List[ReportFile]) -> None:
     session_tokens_table.add_column("Out Tok/Sess Med", justify="right")
     session_tokens_table.add_column("Out Tok/Sess P90", justify="right")
 
+    # Table 4: TFUT (Time to First User Token)
+    tfut_table = Table(
+        title="[bold magenta]Session TFUT (Time to First User Token)[/bold magenta]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    tfut_table.add_column("Stage", justify="right")
+    tfut_table.add_column("TFUT Mean (s)", justify="right")
+    tfut_table.add_column("TFUT Med (s)", justify="right")
+    tfut_table.add_column("TFUT P90 (s)", justify="right")
+    tfut_table.add_column("Sessions w/ TFUT", justify="right")
+    tfut_table.add_column("TFUT None Reasons", justify="right")
+    has_any_tfut = False
+
     for stage_id in sorted_stages:
         contents = session_reports[stage_id]
 
@@ -439,6 +453,33 @@ def print_session_summary_tables(reports: List[ReportFile]) -> None:
             f"{output_p90:.1f}",
         )
 
+        # Extract TFUT metrics
+        sessions_with_tfut = contents.get("sessions_with_tfut", 0)
+        tfut_sec = contents.get("tfut_sec", {})
+        tfut_none_reasons = contents.get("tfut_none_reasons")
+
+        if sessions_with_tfut > 0:
+            has_any_tfut = True
+            tfut_mean = f"{tfut_sec.get('mean', 0.0):.3f}"
+            tfut_median = f"{tfut_sec.get('median', 0.0):.3f}"
+            tfut_p90 = f"{tfut_sec.get('p90', 0.0):.3f}"
+        else:
+            tfut_mean = tfut_median = tfut_p90 = "-"
+
+        reasons_str = "-"
+        if tfut_none_reasons:
+            reasons_str = ", ".join(f"{k}: {v}" for k, v in tfut_none_reasons.items())
+
+        # Populate Table 4
+        tfut_table.add_row(
+            str(stage_id),
+            tfut_mean,
+            tfut_median,
+            tfut_p90,
+            str(sessions_with_tfut),
+            reasons_str,
+        )
+
     # Table 4: KV Cache Hit Rate (only when at least one stage reports it)
     has_cache_info = any(session_reports[stage_id].get("kv_cache_hit_percent") is not None for stage_id in sorted_stages)
     cache_table: Optional[Table] = None
@@ -474,6 +515,8 @@ def print_session_summary_tables(reports: List[ReportFile]) -> None:
     console.print(session_tokens_table)
     if cache_table is not None:
         console.print(cache_table)
+    if has_any_tfut:
+        console.print(tfut_table)
 
 
 def _collect_error_labels(failures_by_stage: Dict[int, Dict[str, Any]]) -> list[str]:

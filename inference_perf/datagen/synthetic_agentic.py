@@ -34,6 +34,7 @@ from inference_perf.config import APIConfig, DataConfig
 from inference_perf.config.datagen.replay import SyntheticAgenticConfig
 from inference_perf.config.common import Distribution
 from inference_perf.datagen.replay.replay_graph_session_datagen import ReplayGraphSessionGeneratorBase, ReplaySession
+from inference_perf.datagen.replay.otel_trace_to_replay_graph import tag_user_facing_events
 from inference_perf.datagen.replay.replay_graph_types import GraphCall, GraphEvent, InputSegment, ReplayGraph
 from inference_perf.datagen.synthetic_themes import (
     GENERIC_THEME,
@@ -2316,5 +2317,6 @@ class SyntheticAgenticDataGenerator(ReplayGraphSessionGeneratorBase):
         graph = build_graph_for_session(self.synthetic_config, theme, self.tokenizer, session_index)
         if not graph.events:
             return None
+        tag_user_facing_events(graph)
         sid = f"synthN{session_index}"
         return ReplaySession(session_id=sid, source_id=sid, session_index=session_index, graph=graph)
