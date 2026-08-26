@@ -15,7 +15,7 @@
 from abc import abstractmethod
 from typing import Any, List, Optional
 from aiohttp import ClientResponse
-from pydantic import BaseModel, SerializeAsAny, computed_field
+from pydantic import BaseModel, Field, SerializeAsAny, computed_field
 from inference_perf.payloads import RequestBody, RequestMetrics
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 from inference_perf.config import APIConfig, APIType
@@ -43,6 +43,7 @@ class InferenceInfo(BaseModel):
     response_metrics: Optional[SerializeAsAny[ResponseMetrics]] = None
     extra_info: dict[str, Any] = {}
     lora_adapter: Optional[str] = None
+    graph_event_id: Optional[str] = None
     labels: dict[str, str] = {}
 
     # DEPRECATED: mirror of request_metrics.text.input_tokens kept at the top
@@ -118,13 +119,14 @@ class SessionLifecycleMetric(BaseModel):
     num_structured_output_excluded: Optional[int] = None
     tfut_sec: Optional[float] = None
     tfut_none_reason: Optional[str] = None
-    dispatch_perf_counter: Optional[float] = None
+    dispatch_perf_counter: Optional[float] = Field(default=None, exclude=True)
 
 
 class InferenceAPIData(BaseModel):
     # loadgen should assign this request to preferred worker if possible
     preferred_worker_id: int = -1  # no preferred worker by default
     session_id: Optional[str] = None  # set by loadgen for session-based workloads
+    graph_event_id: Optional[str] = None
     otel_context: Optional[dict[str, str]] = None  # OTEL trace context for distributed tracing
     stage_id: int = 0  # stage id
     headers: Optional[dict[str, str]] = None

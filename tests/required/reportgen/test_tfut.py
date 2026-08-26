@@ -71,7 +71,7 @@ def _make_request(
         info=InferenceInfo(
             request_metrics=RequestMetrics(text=Text(input_tokens=10)),
             response_metrics=response_metrics,
-            labels={"event_id": event_id},
+            graph_event_id=event_id,
         ),
         error=None,
         session_id=session_id,

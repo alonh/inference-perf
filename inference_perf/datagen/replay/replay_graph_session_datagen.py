@@ -1659,8 +1659,8 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             error=error,
             n_recorded_substitutions=state.n_recorded_substitutions,
             recorded_substitution_event_ids=state.recorded_substitution_event_ids,
-            user_facing_event_ids=user_facing_event_ids or None,
-            num_structured_output_excluded=num_structured_output_excluded or None,
+            user_facing_event_ids=user_facing_event_ids,
+            num_structured_output_excluded=num_structured_output_excluded,
         )
 
     def activate_session(self, session_id: str) -> None:
@@ -1871,7 +1871,7 @@ class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
             # Back-reference so the event can evict this session from the worker once drained.
             generator=self,
         )
-        api_data.labels["event_id"] = raw_event_id
+        api_data.graph_event_id = raw_event_id
         return api_data
 
     def cleanup_session(self, session_id: str) -> None:

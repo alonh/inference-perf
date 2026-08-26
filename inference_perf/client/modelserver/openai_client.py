@@ -561,6 +561,8 @@ class openAIModelServerClientSession(ModelServerClientSession):
             info = InferenceInfo(request_metrics=RequestMetrics(text=Text(input_tokens=0)))
         if data.labels:
             info.labels = data.labels
+        if data.graph_event_id:
+            info.graph_event_id = data.graph_event_id
 
         metric = RequestLifecycleMetric(
             stage_id=stage_id,

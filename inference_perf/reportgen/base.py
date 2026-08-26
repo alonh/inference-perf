@@ -1046,7 +1046,7 @@ class ReportGenerator:
                 )
                 if m.session_id not in error_by_session and m.error is not None:
                     error_by_session[m.session_id] = m.error
-                event_id = m.info.labels.get("event_id")
+                event_id = m.info.graph_event_id
                 if event_id:
                     requests_by_session_event[m.session_id][event_id] = m
 

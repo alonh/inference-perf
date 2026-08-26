@@ -109,6 +109,7 @@ class GraphEvent:
     wait_ms: int
     t_start_ms: int
     t_end_ms: int
+    # Set by tag_user_facing_events; persisted mostly for graph JSON export.
     is_user_facing: bool = False
     is_structured_output_call: bool = False
     is_tool_internal: bool = False
