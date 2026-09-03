@@ -295,7 +295,10 @@ class openAIModelServerClientSession(ModelServerClientSession):
                     if stripped_response.startswith("data:"):
                         output_parts = []
                         reasoning_parts = []
-                        tool_call_parts = []
+                        # A streaming tool call arrives as many deltas: id and name on the
+                        # first, arguments split across the rest. Accumulate by index so
+                        # output_message matches the non-streaming branch's assembled dict.
+                        tool_call_chunks: Dict[int, Dict[str, Any]] = {}
                         for line in stripped_response.splitlines():
                             line = line.strip()
                             if not line or not line.startswith("data:"):
@@ -316,14 +319,35 @@ class openAIModelServerClientSession(ModelServerClientSession):
                             reasoning_chunk = delta.get("reasoning") or delta.get("reasoning_content")
                             if reasoning_chunk:
                                 reasoning_parts.append(reasoning_chunk)
-                            if delta.get("tool_calls"):
-                                tool_call_parts.append(delta)
+                            for tc_chunk in delta.get("tool_calls") or []:
+                                idx = tc_chunk.get("index", 0)
+                                if idx not in tool_call_chunks:
+                                    tool_call_chunks[idx] = {
+                                        "id": tc_chunk.get("id", ""),
+                                        "type": tc_chunk.get("type", "function"),
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                tc_fn = tc_chunk.get("function") or {}
+                                if tc_fn.get("name"):
+                                    tool_call_chunks[idx]["function"]["name"] += tc_fn["name"]
+                                if tc_fn.get("arguments"):
+                                    tool_call_chunks[idx]["function"]["arguments"] += tc_fn["arguments"]
+                                if tc_chunk.get("id"):
+                                    tool_call_chunks[idx]["id"] = tc_chunk["id"]
 
-                        otel_response_info["output_text"] = "".join(output_parts)
+                        streamed_text = "".join(output_parts)
+                        otel_response_info["output_text"] = streamed_text
                         if reasoning_parts:
                             otel_response_info["reasoning_text"] = "".join(reasoning_parts)
-                        if tool_call_parts:
-                            otel_response_info["output_message"] = json.dumps(tool_call_parts)
+                        if tool_call_chunks:
+                            # Same shape as the non-streaming branch: one assistant message dict.
+                            assembled_message: Dict[str, Any] = {
+                                "role": "assistant",
+                                "tool_calls": [tool_call_chunks[i] for i in sorted(tool_call_chunks)],
+                            }
+                            if streamed_text:
+                                assembled_message["content"] = streamed_text
+                            otel_response_info["output_message"] = json.dumps(assembled_message)
                 elif response and response.status == 200 and response_content:
                     response_json = json.loads(response_content)
                     choices = response_json.get("choices", [])

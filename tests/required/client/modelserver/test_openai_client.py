@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import pytest
 import asyncio
 import aiohttp
@@ -168,6 +169,92 @@ async def test_otel_records_output_from_sse_response(mock_client: MagicMock, moc
     call_kwargs = mock_client.otel.record_response_metrics.call_args[1]
     response_info = call_kwargs["response_info"]
     assert response_info["output_text"] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_otel_assembles_streaming_tool_call_deltas(mock_client: MagicMock, mock_data: MagicMock) -> None:
+    """Streaming tool_call deltas are merged by index into one assistant message.
+
+    A streaming tool call arrives as many `function.arguments` fragments. Recording the
+    raw deltas would make gen_ai.output.message a list of fragments -- a different JSON
+    shape than the non-streaming branch, which records the server-assembled message dict.
+    The fragments below are shaped like real vLLM 0.27.1 output: two parallel tool calls,
+    each with its `arguments` split across chunks, and the id/name only on the first chunk.
+    """
+    from contextlib import contextmanager
+
+    mock_client.api_config.streaming = True
+    mock_client.api_config.type = APIType.Chat
+    mock_client.api_config.response_format = None
+    mock_client.api_key = None
+    mock_client.model_name = "test-model"
+    mock_client.max_completion_tokens = 30
+    mock_client.ignore_eos = True
+
+    mock_span = MagicMock()
+    mock_client.otel.enabled = True
+
+    @contextmanager
+    def fake_trace(**kwargs):  # type: ignore[no-untyped-def]
+        yield mock_span
+
+    mock_client.otel.trace_llm_request = fake_trace
+
+    def chunk(tool_calls: list[dict[str, object]]) -> str:
+        body = {"id": "chatcmpl-1", "choices": [{"index": 0, "delta": {"tool_calls": tool_calls}, "finish_reason": None}]}
+        return f"data: {json.dumps(body)}\n\n"
+
+    # Two parallel tool calls; id/name arrive only on the first chunk of each, and the
+    # arguments JSON is split across chunks exactly as vLLM emits it.
+    sse_content = (
+        chunk([{"index": 0, "id": "call_a", "type": "function", "function": {"name": "Glob"}}])
+        + chunk([{"index": 0, "function": {"arguments": '{"pattern": "'}}])
+        + chunk([{"index": 0, "function": {"arguments": "**/*."}}])
+        + chunk([{"index": 0, "function": {"arguments": 'sv"}'}}])
+        + chunk([{"index": 1, "id": "call_b", "type": "function", "function": {"name": "Bash"}}])
+        + chunk([{"index": 1, "function": {"arguments": '{"command": "ls"}'}}])
+        + "data: [DONE]\n\n"
+    )
+
+    mock_data.session_id = None
+    mock_data.otel_context = None
+    mock_data.messages = None
+    mock_data.prompt = None
+    mock_data.process_response = AsyncMock(
+        return_value=InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            extra_info={"raw_response": sse_content},
+        )
+    )
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_post_ctx = MagicMock()
+    mock_post_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    session = openAIModelServerClientSession(mock_client)
+    session.session = MagicMock()
+    session.session.post.return_value = mock_post_ctx
+
+    await session.process_request(mock_data, stage_id=1, scheduled_time=0.0)
+
+    response_info = mock_client.otel.record_response_metrics.call_args[1]["response_info"]
+    assembled = json.loads(response_info["output_message"])
+
+    # Same shape as the non-streaming branch: a dict, not a list of raw deltas.
+    assert isinstance(assembled, dict)
+    assert assembled["role"] == "assistant"
+    tool_calls = assembled["tool_calls"]
+    assert len(tool_calls) == 2
+
+    # Fragments are concatenated per index, so each arguments string is valid JSON.
+    assert tool_calls[0]["id"] == "call_a"
+    assert tool_calls[0]["function"]["name"] == "Glob"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"pattern": "**/*.sv"}
+    assert tool_calls[1]["id"] == "call_b"
+    assert tool_calls[1]["function"]["name"] == "Bash"
+    assert json.loads(tool_calls[1]["function"]["arguments"]) == {"command": "ls"}
 
 
 @pytest.mark.asyncio
