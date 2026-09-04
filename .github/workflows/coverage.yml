@@ -9,6 +9,9 @@ on:
       - '**/*.md'
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   format-check:
     runs-on: ubuntu-latest
@@ -53,3 +56,24 @@ jobs:
       - name: Run Validation
         if: steps.changes.outputs.code == 'true'
         run: pdm run check:cov
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-reports
+          path: |
+            coverage.json
+            coverage.xml
+            coverage.lcov
+          if-no-files-found: warn
+      # Coveralls renders the README coverage badge. It authenticates with the
+      # built-in GITHUB_TOKEN, so this needs no repository secret and no push
+      # access to any branch (the job stays at contents: read). Restricted to
+      # push-on-main so the badge tracks main and forked PRs, whose token is
+      # read-only, never attempt an upload.
+      - name: Send coverage to Coveralls
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: coverage.lcov
+          format: lcov
