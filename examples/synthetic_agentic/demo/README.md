@@ -46,7 +46,7 @@ calls — budget exhaustion is a clean stop, not a failure.
 | 13 | `13_high_turn_count` | High turn count (`turns_per_session` fixed 32, > 30) | 64 events/session (32 rounds x 2 calls/round); input msg count grows by 2 every round |
 | 14 | `14_high_tool_loop_depth` | High tool-calls-per-turn (`tool_loop_depth` fixed 32, > 30) | 33 events/session (1 principal + 32 tool turns); input msg count grows by 2 every loop iteration |
 | 15 | `15_high_turns_and_tool_loop_distribution` | Realistic distribution for both tails (lognormal, ~5% of draws land at 30+) | wide spread of events/session; most sessions short, a handful run long; 0 errors |
-| 16 | `16_budget_cap` | `max_events_per_session` cap on a deep recursive fan-out (would produce 146 events uncapped) | every session has exactly 47 events; deep sub-agent branches absent; 0 errors — budget exhaustion is a clean stop, not a failure |
+| 16 | `16_budget_cap` | `max_events_per_session` cap on a deep recursive fan-out (would produce 146 events uncapped) | every session has exactly 10 events; deep sub-agent branches absent; 0 errors — budget exhaustion is a clean stop, not a failure |
 
 **Verify a run** (reconstructs sessions from Jaeger spans and checks they match intent):
 

@@ -1,9 +1,9 @@
 # DEMO 16 — Budget cap / session truncation (max_events_per_session).
 # A fully recursive fan-out (fanout_probability=1.0, max_depth=3, 3 sub-agents per spawn) would
-# produce up to 146 events, but max_events_per_session=50
-# cuts each session short once the 50th event is reached.  Sessions are therefore "leaf-truncated":
+# produce up to 146 events, but max_events_per_session=10
+# cuts each session short once the 10th event is reached.  Sessions are therefore "leaf-truncated":
 # the generator stops adding new events and emits the remaining work as leaf answer calls.
-# WHAT TO LOOK FOR: every session has exactly 47 events; the deep sub-agent branches never
+# WHAT TO LOOK FOR: every session has exactly 10 events; the deep sub-agent branches never
 # appear; no errors — budget exhaustion is a clean, expected stop condition, not a failure.
 api: {type: chat, streaming: false}
 data:
@@ -18,7 +18,7 @@ data:
     max_depth: 3
     tool_loop_depth: {type: fixed, mean: 2}
     tool_catalog_size_per_agent: {type: fixed, mean: 5}
-    max_events_per_session: 50          # forces truncation-to-leaf
+    max_events_per_session: 10          # forces truncation-to-leaf
     input_tokens_per_turn:  {type: fixed, mean: 80}
     output_tokens_per_turn: {type: fixed, mean: 30}
     tool_call_latency_sec:  {type: fixed, mean: 0}
