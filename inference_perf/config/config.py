@@ -59,11 +59,6 @@ class Config(StrictBaseModel):
         default=None, description="Circuit breakers that stop the run when observed metrics cross configured thresholds."
     )
 
-    @model_validator(mode="after")
-    def synthetic_agentic_not_yet_available(self) -> "Config":
-        if self.data.type == DataGenType.SyntheticAgentic:
-            raise ValueError("synthetic_agentic is not yet available and will be enabled in a future release.")
-        return self
 
     @model_validator(mode="after")
     def validate_trace_replay_load_type(self) -> "Config":

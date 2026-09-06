@@ -1860,9 +1860,7 @@ def build_graph_for_session(
                 # to be built. Children -- and, because `reserved` is threaded through
                 # `_build_agent`, their descendants -- test the budget against that total,
                 # so a greedy grandchild can no longer consume the events this agent
-                # still owes, and an early child cannot starve a later sibling. Both were
-                # ways to end the loop with `child_terminals != K`, which trips the atomic
-                # rollback below and collapses the whole session to its pre-spawn terminal.
+                # still owes, and an early child cannot starve a later sibling.
                 for c in range(K):
                     child_reserved = reserved + (K + 1) + (K - c - 1) * _MIN_AGENT_COST
                     if not _fits(_MIN_AGENT_COST, child_reserved):
@@ -2029,7 +2027,7 @@ def build_graph_for_session(
                     # pre-spawn snapshot" covers however many events were added, so it
                     # needs no adjustment for the notification chain. prev_id stays at
                     # the pre-spawn terminal; the final normalization re-emits that as a
-                    # plain answer.
+                    # plain answer. Should not be reachable, exists as a safety net.
                     for eid in list(events.keys()):
                         if eid not in events_before_spawn:
                             del events[eid]
