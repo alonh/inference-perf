@@ -439,7 +439,12 @@ class SessionChatCompletionAPIData(ChatCompletionAPIData):
             # tool_choice="none" forbids a structured call (a text <tool_call> in
             # content is harmless -- no role:tool is expected for it), and
             # ignore_eos=False lets the answer stop at its natural end.
-            payload["tool_choice"] = "none"
+            #
+            # as_recorded suppresses the tool_choice here too, since the flag
+            # promises to inject none at all. ignore_eos=False stays: it is not a
+            # tool_choice policy, and without it this turn cannot stop.
+            if self.tool_choice_mode == ToolChoiceMode.FORCE_RECORDED:
+                payload["tool_choice"] = "none"
             payload["ignore_eos"] = False
 
         return payload

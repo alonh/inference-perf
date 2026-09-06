@@ -637,9 +637,24 @@ until `max_tokens` — see
 streaming this truncation is reported as `finish_reason: "tool_calls"`, not
 `"length"`, so it is easy to miss.
 
-The trade-off is fidelity in the other direction: with `as_recorded` the model
-may answer in prose on a turn the recording answered with a call, leaving the
-successor's recorded tool results unmatched. Which matters more depends on what
+The trade-off is fidelity in the other direction, and it is not local. With
+`as_recorded` the model may answer in prose on a turn the recording answered with
+a call. Replay does not degrade that turn gracefully: the successor's recorded
+`role: "tool"` messages would carry dangling `tool_call_id` references, so the
+event is marked failed, and because failure is session-scoped
+(`record_failure` -> `_fail_and_notify` -> `mark_session_failed`) **the entire
+session fails and every event downstream of that turn is cancelled.**
+
+Because a replayed session is a graph, the cost depends on where the prose answer
+lands, not on how minor it looks. A prose answer early in a long session discards
+nearly all of that session's remaining LLM calls. That also biases the run: the
+sessions that survive are the ones whose forced turns happened to behave, so
+throughput and latency get computed over a subset that is not the workload you
+configured. Cross-check `total_events_cancelled` and the failed-session count
+rather than reading the request-level error rate alone.
+
+So prefer `as_recorded` when `"required"` is actively breaking your server, and
+expect to trade session completeness for it. Which matters more depends on what
 you are measuring.
 
 `tool_choice_mode` is independent of `override_tool_call_max_tokens`: it changes

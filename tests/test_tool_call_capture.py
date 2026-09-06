@@ -171,8 +171,15 @@ class TestSubstitutionWithToolCalls:
         assert result[1] == mixed_msg
 
 
-class TestToolChoiceInjection:
-    """Tests for tool_choice injection in to_request_body when expected output was a tool call."""
+class ToolChoiceEventFactory:
+    """Builds a SessionChatCompletionAPIData for tool_choice tests.
+
+    A plain mixin, not a test class: both TestToolChoiceInjection and
+    TestToolChoiceModeAsRecorded pull the helper from here so neither inherits
+    the other's assertions. Inheriting the test class instead would re-run
+    force_recorded cases under the as_recorded class name, which reads as
+    coverage of a mode that those cases never exercise.
+    """
 
     def _make_api_data(
         self,
@@ -197,6 +204,10 @@ class TestToolChoiceInjection:
             expected_output_tool_names=expected_output_tool_names,
             tool_choice_mode=tool_choice_mode,
         )
+
+
+class TestToolChoiceInjection(ToolChoiceEventFactory):
+    """tool_choice injection under force_recorded (the default)."""
 
     @pytest.mark.asyncio
     async def test_single_tool_call_forces_specific_function(self) -> None:
@@ -278,12 +289,13 @@ class TestToolChoiceInjection:
         assert payload["tool_choice"] == "required"
 
 
-class TestToolChoiceModeAsRecorded(TestToolChoiceInjection):
+class TestToolChoiceModeAsRecorded(ToolChoiceEventFactory):
     """tool_choice_mode=as_recorded suppresses every injection.
 
-    Reuses TestToolChoiceInjection's helper, which threads tool_choice_mode
-    through to the event. Inheriting also re-runs the force_recorded cases, so
-    the default stays covered alongside the new mode.
+    Shares only the event factory with TestToolChoiceInjection. Every case here
+    passes tool_choice_mode=AS_RECORDED explicitly, so a passing test in this
+    class always says something about as_recorded -- including the plain-text
+    turn, which is the branch that injects "none" under force_recorded.
     """
 
     _SINGLE_TOOL = [
@@ -327,6 +339,22 @@ class TestToolChoiceModeAsRecorded(TestToolChoiceInjection):
         )
         payload = await api_data.to_request_body("model", 100, False, False)
         assert "tool_choice" not in payload
+
+    @pytest.mark.asyncio
+    async def test_text_turn_none_is_suppressed_but_ignore_eos_kept(self) -> None:
+        """A text turn advertising tools gets no "none" either.
+
+        force_recorded injects tool_choice="none" here to stop a model deep in a
+        tool loop from emitting a call with no matching role:tool successor.
+        as_recorded promises to inject no tool_choice at all, so that is dropped
+        too -- and the caller accepts dangling-call risk on this turn as the
+        documented cost. ignore_eos is not a tool_choice policy and must survive:
+        without it the turn cannot stop at its natural end.
+        """
+        api_data = self._make_api_data(self._SINGLE_TOOL, False, None, tool_choice_mode=ToolChoiceMode.AS_RECORDED)
+        payload = await api_data.to_request_body("model", 100, False, False)
+        assert "tool_choice" not in payload
+        assert payload["ignore_eos"] is False
 
     @pytest.mark.asyncio
     async def test_tools_still_advertised(self) -> None:
