@@ -1,9 +1,5 @@
 # Synthetic Agentic Session Replay
 
-> **Not yet available.** `data.type: synthetic_agentic` is still being finalized and is not
-> enabled in any released version. Attempting to use it will produce a validation error at startup.
-> This document describes the intended interface for when the feature ships.
-
 Generate agentic LLM workloads procedurally, without a recorded trace. `synthetic_agentic` builds
 replay-graph sessions — multi-turn conversations, tool-calling loops, and recursive sub-agent
 fan-out — from a handful of config knobs, then drives them against the target inference server
