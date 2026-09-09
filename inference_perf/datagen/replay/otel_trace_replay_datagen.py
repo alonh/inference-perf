@@ -60,6 +60,7 @@ import glob
 import json
 import logging
 import random
+from datetime import datetime, timezone
 from multiprocessing.managers import SyncManager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union, cast
@@ -202,6 +203,21 @@ def _normalize_file_trace(data: Dict[str, Any], source_name: str, source_path: s
             normalized["max_tokens"] = max_tokens
         if "total_tokens" not in normalized:
             normalized["total_tokens"] = total_tokens
+
+    if "session_duration_ms" not in normalized:
+        timestamps: List[float] = []
+        for span in normalized.get("spans", []):
+            for ts_key in ("start_time", "end_time"):
+                ts_val = span.get(ts_key)
+                if ts_val:
+                    try:
+                        dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        timestamps.append(dt.timestamp())
+                    except (ValueError, AttributeError):
+                        pass
+        normalized["session_duration_ms"] = int((max(timestamps) - min(timestamps)) * 1000) if timestamps else 0
 
     return normalized
 
@@ -432,6 +448,8 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         cols = dataset.column_names
         session_id_col = list(dataset["session_id"]) if "session_id" in cols else [None] * num_rows
         source_id_col = list(dataset["source_id"]) if "source_id" in cols else [None] * num_rows
+        duration_col = list(dataset["session_duration_ms"]) if "session_duration_ms" in cols else [0] * num_rows
+        models_col = list(dataset["models"]) if "models" in cols else [[] for _ in range(num_rows)]
 
         # Shuffle a permutation of row indices (not the rows themselves) so order is stable
         # and reproducible without holding any span data.
@@ -445,6 +463,8 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         # works immediately and duplicate_sessions_target can expand at the ID level.
         base_ids = [f"trace{slot}_{session_id_col[row] or f'session_{slot}'}" for slot, row in enumerate(order)]
         self._source_ids = [source_id_col[row] for row in order]  # slot -> source_id (or None)
+        self._session_durations_ms: List[int] = [duration_col[row] for row in order]
+        self._session_models: List[List[str]] = [models_col[row] for row in order]
 
         # Expand for duplicate_sessions_target: append (id, source_slot) pairs.
         # _source_indices[i] is None for real slots, or the source slot to copy for duplicates.
@@ -459,6 +479,8 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
                 dup_count += 1
                 session_ids.append(f"{base_ids[src]}_dup{dup_count}")
                 self._source_indices.append(src)
+                self._session_durations_ms.append(self._session_durations_ms[src])
+                self._session_models.append(self._session_models[src])
             logger.warning(
                 f"Session corpus small: {original_count} sessions available. "
                 f"Duplicating to reach {target} sessions for stress testing."
@@ -468,6 +490,38 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             logger.info(f"Session corpus sufficient: {len(base_ids)} sessions available (target: {target})")
 
         self.initialize_sessions_lazy(session_ids)
+
+    def get_stage_time_estimate(
+        self, start_cursor: int, num_sessions: int, concurrent_sessions: int
+    ) -> Optional[Dict[str, Any]]:
+        end = min(start_cursor + num_sessions, len(self._session_durations_ms))
+        durations = self._session_durations_ms[start_cursor:end]
+        if not durations or all(d == 0 for d in durations):
+            return None
+
+        if concurrent_sessions == 0:
+            estimated_ms = float(max(durations))
+        else:
+            estimated_ms = sum(durations) / max(concurrent_sessions, 1)
+
+        recorded: set[str] = set()
+        for m_list in self._session_models[start_cursor:end]:
+            recorded.update(m_list)
+
+        replay: set[str] = set()
+        if self.replay_config and self.replay_config.use_static_model:
+            replay.add(self.replay_config.static_model_name)
+        elif self.replay_config and self.replay_config.model_mapping:
+            for m in recorded:
+                replay.add(self.replay_config.model_mapping.get(m, m))
+        else:
+            replay = set(recorded)
+
+        return {
+            "estimated_seconds": estimated_ms / 1000.0,
+            "recorded_models": sorted(recorded) if recorded else ["unknown"],
+            "replay_models": sorted(replay) if replay else ["unknown"],
+        }
 
     def _build_session(self, session_index: int) -> Optional[ReplaySession]:
         """Build one session's graph on demand (called by _ensure_session_built).
