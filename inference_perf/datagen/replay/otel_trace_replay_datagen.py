@@ -57,6 +57,7 @@ SessionChatCompletionAPIData holds refs to WorkerSessionTracker and completion_q
 """
 
 import glob
+import heapq
 import json
 import logging
 import random
@@ -73,6 +74,7 @@ from inference_perf.datagen.replay.replay_graph_session_datagen import (
 from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
     build_raw_calls,
     build_graph,
+    is_llm_span,
     tag_user_facing_events,
 )
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
@@ -146,6 +148,60 @@ def _validate_dataset_schema(dataset: Any, dataset_path: str) -> None:
     logger.info(f"Schema validation passed for dataset '{dataset_path}'")
 
 
+def _derive_session_duration_ms(spans: List[Dict[str, Any]]) -> int:
+    """Derive session duration from LLM span timestamps, falling back to all spans."""
+    llm_timestamps: List[float] = []
+    all_timestamps: List[float] = []
+    for span in spans:
+        for ts_key in ("start_time", "end_time"):
+            ts_val = span.get(ts_key)
+            if ts_val:
+                try:
+                    dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    ts = dt.timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                all_timestamps.append(ts)
+                if is_llm_span(span, include_errors=True):
+                    llm_timestamps.append(ts)
+    timestamps = llm_timestamps if llm_timestamps else all_timestamps
+    return int((max(timestamps) - min(timestamps)) * 1000) if timestamps else 0
+
+
+def _simulate_stage_duration(
+    durations_sec: List[float],
+    concurrent_sessions: int,
+    session_rate: Optional[float],
+) -> float:
+    """Simulate the work-conserving session scheduler to estimate stage wall-clock time."""
+    active: List[float] = []
+    next_dispatch = 0.0
+    last_finish = 0.0
+
+    for duration in durations_sec:
+        dispatch = next_dispatch
+
+        if 0 < concurrent_sessions <= len(active):
+            earliest_finish = heapq.heappop(active)
+            dispatch = max(dispatch, earliest_finish)
+
+        while active and active[0] <= dispatch:
+            heapq.heappop(active)
+
+        finish = dispatch + duration
+        heapq.heappush(active, finish)
+        last_finish = max(last_finish, finish)
+
+        if session_rate:
+            next_dispatch = dispatch + 1.0 / session_rate
+        else:
+            next_dispatch = dispatch
+
+    return last_finish
+
+
 def _normalize_file_trace(data: Dict[str, Any], source_name: str, source_path: str) -> Dict[str, Any]:
     """Normalize a local OTel JSON trace to align with the HF dataset schema.
 
@@ -203,21 +259,6 @@ def _normalize_file_trace(data: Dict[str, Any], source_name: str, source_path: s
             normalized["max_tokens"] = max_tokens
         if "total_tokens" not in normalized:
             normalized["total_tokens"] = total_tokens
-
-    if "session_duration_ms" not in normalized:
-        timestamps: List[float] = []
-        for span in normalized.get("spans", []):
-            for ts_key in ("start_time", "end_time"):
-                ts_val = span.get(ts_key)
-                if ts_val:
-                    try:
-                        dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        timestamps.append(dt.timestamp())
-                    except (ValueError, AttributeError):
-                        pass
-        normalized["session_duration_ms"] = int((max(timestamps) - min(timestamps)) * 1000) if timestamps else 0
 
     return normalized
 
@@ -448,7 +489,7 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         cols = dataset.column_names
         session_id_col = list(dataset["session_id"]) if "session_id" in cols else [None] * num_rows
         source_id_col = list(dataset["source_id"]) if "source_id" in cols else [None] * num_rows
-        duration_col = list(dataset["session_duration_ms"]) if "session_duration_ms" in cols else [0] * num_rows
+        duration_col = [_derive_session_duration_ms(dataset[i]["spans"]) for i in range(num_rows)]
         models_col = list(dataset["models"]) if "models" in cols else [[] for _ in range(num_rows)]
 
         # Shuffle a permutation of row indices (not the rows themselves) so order is stable
@@ -492,17 +533,19 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         self.initialize_sessions_lazy(session_ids)
 
     def get_stage_time_estimate(
-        self, start_cursor: int, num_sessions: int, concurrent_sessions: int
+        self,
+        start_cursor: int,
+        num_sessions: int,
+        concurrent_sessions: int,
+        session_rate: Optional[float],
     ) -> Optional[Dict[str, Any]]:
         end = min(start_cursor + num_sessions, len(self._session_durations_ms))
         durations = self._session_durations_ms[start_cursor:end]
         if not durations or all(d == 0 for d in durations):
             return None
 
-        if concurrent_sessions == 0:
-            estimated_ms = float(max(durations))
-        else:
-            estimated_ms = sum(durations) / max(concurrent_sessions, 1)
+        durations_sec = [d / 1000.0 for d in durations]
+        estimated_seconds = _simulate_stage_duration(durations_sec, concurrent_sessions, session_rate)
 
         recorded: set[str] = set()
         for m_list in self._session_models[start_cursor:end]:
@@ -518,7 +561,7 @@ class OTelTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
             replay = set(recorded)
 
         return {
-            "estimated_seconds": estimated_ms / 1000.0,
+            "estimated_seconds": estimated_seconds,
             "recorded_models": sorted(recorded) if recorded else ["unknown"],
             "replay_models": sorted(replay) if replay else ["unknown"],
         }

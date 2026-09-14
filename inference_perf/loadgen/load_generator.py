@@ -572,7 +572,9 @@ class LoadGenerator:
             f"total_sessions={total_sessions}"
         )
 
-        estimate = self.datagen.get_stage_time_estimate(stage_start_cursor, effective_num_sessions, concurrent_sessions)
+        estimate = self.datagen.get_stage_time_estimate(
+            stage_start_cursor, effective_num_sessions, concurrent_sessions, session_rate
+        )
         if estimate is not None:
             est_secs = estimate["estimated_seconds"]
             hours, remainder = divmod(int(est_secs), 3600)
@@ -588,7 +590,7 @@ class LoadGenerator:
             replay_str = ", ".join(estimate["replay_models"])
             logger.info(
                 f"Estimated stage duration: ~{time_str} "
-                f"(based on recorded response times from model(s): {recorded_str}; "
+                f"(based on recorded session timing from model(s): {recorded_str}; "
                 f"replay model: {replay_str}; actual times may differ)"
             )
 

@@ -123,7 +123,11 @@ class SessionGenerator(BaseGenerator):
     """
 
     def get_stage_time_estimate(
-        self, start_cursor: int, num_sessions: int, concurrent_sessions: int
+        self,
+        start_cursor: int,
+        num_sessions: int,
+        concurrent_sessions: int,
+        session_rate: Optional[float],
     ) -> Optional[Dict[str, Any]]:
         """Return an estimated duration for a stage based on recorded trace timings.
 
