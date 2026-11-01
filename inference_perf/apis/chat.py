@@ -139,53 +139,6 @@ _ALLOWED_JSON_SCHEMA_KEYS = {
 }
 
 
-def _clean_schema(obj: Any, is_properties_map: bool = False) -> Any:
-    """Recursively remove non-standard JSON Schema keys from a parameters dict.
-
-    is_properties_map: when True, obj is the value of a 'properties' key —
-    its keys are property names (not schema keywords) and must be preserved.
-
-    vLLM requires every property schema to have a top-level 'type'. When a
-    property uses only 'anyOf' (no 'type'), we inject 'type': 'string' as a
-    safe fallback so the validator does not reject the tool definition.
-    """
-    if isinstance(obj, dict):
-        if is_properties_map:
-            return {k: _clean_schema(v) for k, v in obj.items()}
-        cleaned = {}
-        for k, v in obj.items():
-            if k not in _ALLOWED_JSON_SCHEMA_KEYS:
-                continue
-            # vLLM/simulator require additionalProperties to be a boolean.
-            # Object-valued schemas (e.g. {"type": "string"}) are valid JSON
-            # Schema but rejected by the server — coerce to false.
-            if k == "additionalProperties" and not isinstance(v, bool):
-                v = False
-            cleaned[k] = _clean_schema(v, is_properties_map=(k == "properties"))
-        # vLLM requires a plain 'type' on every property schema and does not
-        # support anyOf/oneOf. Collapse to 'type': 'string' as a safe fallback.
-        if "type" not in cleaned:
-            cleaned.pop("anyOf", None)
-            cleaned.pop("oneOf", None)
-            cleaned["type"] = "string"
-        elif "anyOf" in cleaned or "oneOf" in cleaned:
-            cleaned.pop("anyOf", None)
-            cleaned.pop("oneOf", None)
-        # vLLM/simulator require "type": "object" schemas to include
-        # "properties". Map-like schemas (using only additionalProperties /
-        # propertyNames) lack it — inject an empty one.
-        if cleaned.get("type") == "object" and "properties" not in cleaned:
-            cleaned["properties"] = {}
-        return cleaned
-    if isinstance(obj, list):
-        return [_clean_schema(v) for v in obj]
-    return obj
-
-
-def _clean_parameters(obj: Any) -> Any:
-    return _clean_schema(obj)
-
-
 class ChatMessage(BaseModel):
     role: str
     content: Optional[Union[str, list[dict[str, Any]]]] = None
@@ -542,7 +495,7 @@ class ChatCompletionAPIData(InferenceAPIData):
                             "function": {
                                 "name": fn["name"],
                                 "description": fn.get("description"),
-                                "parameters": _clean_parameters(fn.get("parameters")),
+                                "parameters": fn.get("parameters"),
                             },
                         }
                     )
@@ -554,7 +507,7 @@ class ChatCompletionAPIData(InferenceAPIData):
                             "function": {
                                 "name": t["name"],
                                 "description": t.get("description"),
-                                "parameters": _clean_parameters(t.get("parameters")),
+                                "parameters": t.get("parameters"),
                             },
                         }
                     )

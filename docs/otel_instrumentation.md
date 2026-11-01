@@ -38,6 +38,8 @@ OTEL instrumentation is controlled via environment variables. Tracing is **disab
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint for exporting traces (e.g., `http://localhost:4317`)
   - If not set, traces are exported to console (stdout)
   - If set, traces are exported via OTLP to the specified endpoint
+- `OTEL_TRACES_FILE`: Also write every trace to this file in Jaeger JSON format (no Jaeger needed)
+  - Can be combined with `OTEL_EXPORTER_OTLP_ENDPOINT`; when set alone, the console exporter is not used
 - `OTEL_SERVICE_NAME`: Service name for tracing (default: `"inference-perf"`)
 - `OTEL_TRACE_PER_STAGE`: Set to `"true"` to create one trace per stage instead of per session (default: `"false"`)
   - When enabled, all sessions within a stage are grouped under a single stage-level trace
@@ -74,6 +76,23 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 export OTEL_SERVICE_NAME="my-inference-service"
 python -m inference_perf.main --config config.yml
 ```
+
+### Export to a File (Jaeger JSON)
+
+To keep the traces of a run without a Jaeger instance, write them to a local file:
+
+```bash
+export OTEL_TRACES_ENABLED="true"
+export OTEL_TRACES_FILE="traces.json"
+python -m inference_perf.main --config config.yml
+```
+
+The file holds the same `{"data": [trace, ...]}` document that Jaeger's `/api/traces`
+endpoint and its UI "Download JSON" button produce, one trace per replayed session (or per
+stage with `OTEL_TRACE_PER_STAGE`), so it can be fed straight to `scripts/trace_cv.py` or
+loaded into the Jaeger UI ("Search" → "Upload"). While the run is in progress each process
+writes its spans to `<file>.parts/`; they are merged into `<file>` when the run ends. If the run
+is killed before that, the part files are left behind.
 
 ### Using with Jaeger
 

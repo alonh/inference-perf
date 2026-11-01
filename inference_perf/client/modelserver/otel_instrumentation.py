@@ -23,6 +23,7 @@ Environment Variables:
     OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint for exporting traces (e.g., "http://localhost:4317")
     OTEL_SERVICE_NAME: Service name for tracing (default: "inference-perf")
     OTEL_TRACE_PER_STAGE: Set to "true" to create one trace per stage instead of per session (default: false)
+    OTEL_TRACES_FILE: Also write traces to this file in Jaeger JSON format (no Jaeger needed)
 """
 
 import logging
@@ -124,6 +125,7 @@ class OTelInstrumentation:
         - OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint (e.g., "http://localhost:4317")
         - OTEL_SERVICE_NAME: Service name (default: "inference-perf")
         - OTEL_TRACE_PER_STAGE: Set to "true" to create one trace per stage instead of per session (default: false)
+        - OTEL_TRACES_FILE: Also write traces to this file in Jaeger JSON format (no Jaeger needed)
         """
         # Read configuration from environment variables or use provided values
         if enabled is None:
@@ -133,6 +135,7 @@ class OTelInstrumentation:
 
         self.service_name = service_name
         self.otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        self.traces_file = os.getenv("OTEL_TRACES_FILE")
         self.trace_per_stage = os.getenv("OTEL_TRACE_PER_STAGE", "false").lower() == "true"
 
         self.enabled = enabled and OTEL_AVAILABLE
@@ -200,17 +203,34 @@ class OTelInstrumentation:
                     logger.info("Falling back to console exporter")
                     console_exporter = ConsoleSpanExporter()
                     provider.add_span_processor(SimpleSpanProcessor(console_exporter))
-            else:
+            elif not self.traces_file:
                 # Use console exporter for debugging
                 console_exporter = ConsoleSpanExporter()
                 provider.add_span_processor(SimpleSpanProcessor(console_exporter))
                 logger.info("Created OTEL tracer provider with console exporter")
+
+            if self.traces_file:
+                # Jaeger-format JSON file, no Jaeger instance needed
+                from inference_perf.client.modelserver.otel_file_exporter import JaegerJsonFileExporter
+
+                provider.add_span_processor(
+                    BatchSpanProcessor(JaegerJsonFileExporter(self.traces_file), schedule_delay_millis=1000)
+                )
+                logger.info(f"Writing OTEL traces (Jaeger JSON) to {self.traces_file}")
 
         self.tracer = trace.get_tracer(self.service_name)
         # The hasattr check above guarantees `provider` exposes the SDK surface
         # (force_flush, shutdown, add_span_processor); cast so the static type matches.
         self._provider: "TracerProvider" = cast("TracerProvider", provider)
         logger.info(f"OTEL instrumentation enabled for service: {self.service_name}")
+
+    def flush(self) -> None:
+        """Flush pending spans without shutting down (used by worker processes before they exit)."""
+        if hasattr(self, "_provider") and self._provider:
+            try:
+                self._provider.force_flush(timeout_millis=5000)
+            except Exception as e:
+                logger.warning(f"Error during OTEL flush: {e}")
 
     def shutdown(self) -> None:
         """Shutdown the tracer provider and flush all pending spans."""
@@ -354,6 +374,10 @@ class OTelInstrumentation:
                 # Output text (gen_ai.output.text) — plain text only
                 if "output_text" in response_info:
                     span.set_attribute("gen_ai.output.text", response_info["output_text"])
+
+                # Reasoning / thinking tokens (gen_ai.output.reasoning)
+                if "reasoning_text" in response_info:
+                    span.set_attribute("gen_ai.output.reasoning", response_info["reasoning_text"])
 
                 # Full output message when tool calls are present (gen_ai.output.message)
                 if "output_message" in response_info:
@@ -535,6 +559,12 @@ def get_otel_instrumentation(service_name: Optional[str] = None, enabled: Option
         _global_instrumentation = OTelInstrumentation(service_name=service_name, enabled=enabled)
 
     return _global_instrumentation
+
+
+def flush_otel_instrumentation() -> None:
+    """Flush the global instance's pending spans, if one was created; never creates one."""
+    if _global_instrumentation is not None:
+        _global_instrumentation.flush()
 
 
 def summarize_media(value: Any) -> Any:

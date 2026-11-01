@@ -21,7 +21,7 @@ from inference_perf.datagen import DataGenerator, SessionGenerator, LazyLoadData
 from inference_perf.apis import InferenceAPIData
 from inference_perf.apis.user_session import LocalUserSession
 from inference_perf.client.modelserver import ModelServerClient
-from inference_perf.client.modelserver.otel_instrumentation import get_otel_instrumentation
+from inference_perf.client.modelserver.otel_instrumentation import flush_otel_instrumentation, get_otel_instrumentation
 from inference_perf.circuit_breaker import get_circuit_breaker
 from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.config import (
@@ -604,7 +604,11 @@ class Worker(mp.Process):
         # Forked with the load generator's SIGTERM handler; terminate() needs the default action.
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         set_event_loop_policy(uvloop.EventLoopPolicy())
-        run(self.loop())
+        try:
+            run(self.loop())
+        finally:
+            # Forked workers exit without running atexit hooks, so queued spans would be lost.
+            flush_otel_instrumentation()
 
     def _report_crash(self, exc: BaseException) -> None:
         """Log the failure locally and hand a structured copy to the parent before exiting."""
